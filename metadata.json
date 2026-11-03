@@ -1,0 +1,6 @@
+{
+  "name": "DompetKu - Catatan Keuangan Pribadi",
+  "description": "Aplikasi pencatat keuangan pribadi offline-first dengan Dexie.js, analitik visual, anggaran, kalender, serta fitur AI cerdas untuk scan struk dan konsultasi keuangan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
