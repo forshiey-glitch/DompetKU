@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   Moon,
   Sun,
@@ -15,21 +15,45 @@ import {
   RefreshCw,
   LogOut,
   User,
+  Tags,
+  FileSpreadsheet,
 } from 'lucide-react';
-import { db, Category, DEFAULT_CATEGORIES } from '../db';
+import { db, Category, DEFAULT_CATEGORIES, deleteCategoryAndReassign } from '../db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useTheme } from '../context/ThemeContext';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
 import { CategoryIcon, ICON_OPTIONS, COLOR_OPTIONS } from '../components/CategoryIcon';
 import { PWAInstallButton } from '../components/PWAInstallButton';
+import { exportToExcel } from '../utils/exportExcel';
+import { formatMonthIndo } from '../utils/format';
 
 export const Pengaturan: React.FC = () => {
   const { theme, toggleTheme } = useTheme();
   const { showToast } = useToast();
-  const { userEmail, username, signOut, isDemoUser, updateProfile } = useAuth();
+  const { userId, userEmail, username, signOut, isDemoUser, updateProfile } = useAuth();
 
   const categories = useLiveQuery(() => db.categories.toArray()) || [];
+  const allTransactions = useLiveQuery(() => db.transactions.toArray()) || [];
+  const allWallets = useLiveQuery(() => db.wallets.toArray()) || [];
+
+  const userTransactions = useMemo(
+    () => allTransactions.filter((t) => t.userId === userId),
+    [allTransactions, userId]
+  );
+  const userWallets = useMemo(
+    () => allWallets.filter((w) => w.userId === userId),
+    [allWallets, userId]
+  );
+
+  // Count transactions per category
+  const txCountByCategory = useMemo(() => {
+    const counts = new Map<number, number>();
+    userTransactions.forEach((t) => {
+      counts.set(t.categoryId, (counts.get(t.categoryId) || 0) + 1);
+    });
+    return counts;
+  }, [userTransactions]);
 
   // Edit Profile State
   const [isEditingProfile, setIsEditingProfile] = useState(false);
@@ -40,13 +64,16 @@ export const Pengaturan: React.FC = () => {
     setProfileUsername(username);
   }, [username]);
 
-  // Category Modal State
+  // Dedicated "Kelola Kategori" Manager Modal + Add/Edit Sub-Modal
+  const [catManagerOpen, setCatManagerOpen] = useState(false);
   const [catModalOpen, setCatModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [catName, setCatName] = useState('');
   const [catIcon, setCatIcon] = useState('ShoppingBag');
   const [catColor, setCatColor] = useState('#3b82f6');
   const [catType, setCatType] = useState<'expense' | 'income' | 'both'>('expense');
+  const [deletingCategory, setDeletingCategory] = useState<Category | null>(null);
+  const [isDeletingCategory, setIsDeletingCategory] = useState(false);
 
   // Import Confirmation Modal State
   const [pendingImportData, setPendingImportData] = useState<any | null>(null);
@@ -146,19 +173,39 @@ export const Pengaturan: React.FC = () => {
     }
   };
 
-  const handleDeleteCategory = async (cat: Category) => {
-    if (!cat.id) return;
+  const handleConfirmDeleteCategory = async () => {
+    if (!deletingCategory?.id) return;
+    setIsDeletingCategory(true);
     try {
-      const count = await db.transactions.where('categoryId').equals(cat.id).count();
-      if (count > 0) {
-        showToast(`Kategori ini memiliki ${count} transaksi, tidak dapat dihapus langsung.`, 'error');
-        return;
+      const result = await deleteCategoryAndReassign(deletingCategory.id);
+      if (result.reassignedCount > 0) {
+        showToast(
+          `Kategori dihapus. ${result.reassignedCount} transaksi dipindahkan ke "${result.fallbackCategoryName}".`,
+          'success'
+        );
+      } else {
+        showToast('Kategori berhasil dihapus', 'info');
       }
-      await db.categories.delete(cat.id);
-      showToast('Kategori berhasil dihapus', 'info');
+      setDeletingCategory(null);
     } catch (err: any) {
       showToast(err.message || 'Gagal menghapus kategori', 'error');
+    } finally {
+      setIsDeletingCategory(false);
     }
+  };
+
+  // Export Excel (.xlsx) from Pengaturan
+  const handleExportExcel = () => {
+    const now = new Date();
+    const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const filename = exportToExcel({
+      transactions: userTransactions,
+      categories,
+      wallets: userWallets,
+      periodLabel: `Semua Transaksi (${formatMonthIndo(currentYm)})`,
+      yearMonth: currentYm,
+    });
+    showToast(`File Excel "${filename}" berhasil diunduh!`, 'success');
   };
 
   // Export JSON Backup ("Ekspor Data")
@@ -448,79 +495,98 @@ export const Pengaturan: React.FC = () => {
         </div>
       </div>
 
-      {/* Categories Manager */}
+      {/* Categories Manager Card + Full Modal Trigger */}
       <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+            <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Tags className="w-4 h-4 text-emerald-600" />
               Kelola Kategori ({categories.length})
             </h2>
             <p className="text-xs text-slate-400">
-              Sesuaikan ikon, warna, dan nama kategori transaksi Anda
+              Tambah, edit, atau hapus kategori (transaksi otomatis aman dipindah ke Lainnya)
             </p>
           </div>
-          <button
-            onClick={() => handleOpenCatModal()}
-            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1 shadow-xs"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            Tambah
-          </button>
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={() => setCatManagerOpen(true)}
+              className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors"
+            >
+              Buka Kelola Kategori
+            </button>
+            <button
+              type="button"
+              onClick={() => handleOpenCatModal()}
+              className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1 shadow-xs"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Tambah
+            </button>
+          </div>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5 max-h-72 overflow-y-auto pr-1">
-          {categories.map((cat) => (
-            <div
-              key={cat.id}
-              className="p-2.5 rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 flex items-center justify-between group"
-            >
-              <div className="flex items-center gap-2 min-w-0 pr-1">
-                <div
-                  className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 shadow-xs"
-                  style={{ backgroundColor: cat.color }}
-                >
-                  <CategoryIcon name={cat.icon} size={15} className="text-white" />
-                </div>
-                <div className="min-w-0">
-                  <p className="text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
-                    {cat.name}
-                  </p>
-                  <span className="text-[11px] text-slate-400 capitalize">
-                    {cat.type || 'expense'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-0.5 opacity-80 sm:opacity-0 group-hover:opacity-100 transition-opacity">
-                <button
-                  onClick={() => handleOpenCatModal(cat)}
-                  className="p-1 text-slate-400 hover:text-emerald-600 rounded-md"
-                >
-                  <Edit2 className="w-3 h-3" />
-                </button>
-                {!cat.isDefault && (
-                  <button
-                    onClick={() => handleDeleteCategory(cat)}
-                    className="p-1 text-slate-400 hover:text-rose-600 rounded-md"
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 max-h-72 overflow-y-auto pr-1">
+          {categories.map((cat) => {
+            const isLainnya = cat.name.trim().toLowerCase() === 'lainnya';
+            const linkedCount = cat.id ? txCountByCategory.get(cat.id) || 0 : 0;
+            return (
+              <div
+                key={cat.id}
+                className="p-2.5 rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 flex items-center justify-between group"
+              >
+                <div className="flex items-center gap-2.5 min-w-0 pr-1">
+                  <div
+                    className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 shadow-xs"
+                    style={{ backgroundColor: cat.color }}
                   >
-                    <Trash2 className="w-3 h-3" />
+                    <CategoryIcon name={cat.icon} size={15} className="text-white" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
+                      {cat.name}
+                    </p>
+                    <span className="text-[11px] text-slate-400">
+                      {linkedCount} transaksi
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenCatModal(cat)}
+                    title="Edit Kategori"
+                    className="p-1.5 text-slate-400 hover:text-emerald-600 rounded-md"
+                  >
+                    <Edit2 className="w-3.5 h-3.5" />
                   </button>
-                )}
+                  {!isLainnya && (
+                    <button
+                      type="button"
+                      onClick={() => setDeletingCategory(cat)}
+                      title="Hapus Kategori"
+                      className="p-1.5 text-slate-400 hover:text-rose-600 rounded-md"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
-      {/* Backup & Restore (JSON): Ekspor Data & Impor Data */}
+      {/* Backup, Restore (JSON) & Ekspor Excel */}
       <div className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
         <div>
           <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
             <Database className="w-4 h-4 text-emerald-600" />
-            Cadangan & Pemulihan Data (JSON)
+            Laporan Excel & Cadangan Data
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Ekspor seluruh transaksi, dompet, hutang, anggaran, dan tabungan Anda menjadi file JSON atau pulihkan kembali kapan saja.
+            Unduh laporan berwarna dalam format Excel (.xlsx) atau ekspor/impor seluruh data IndexedDB sebagai JSON.
           </p>
         </div>
 
@@ -532,8 +598,18 @@ export const Pengaturan: React.FC = () => {
           className="hidden"
         />
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
           <button
+            type="button"
+            onClick={handleExportExcel}
+            className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 text-xs font-bold text-emerald-700 dark:text-emerald-300 transition-colors shadow-xs"
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            Ekspor ke Excel
+          </button>
+
+          <button
+            type="button"
             onClick={handleExportJson}
             className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-300 transition-colors shadow-xs"
           >
@@ -542,6 +618,7 @@ export const Pengaturan: React.FC = () => {
           </button>
 
           <button
+            type="button"
             onClick={() => fileInputRef.current?.click()}
             className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-bold text-slate-700 dark:text-slate-300 transition-colors shadow-xs"
           >
@@ -681,6 +758,132 @@ export const Pengaturan: React.FC = () => {
         )}
       </div>
 
+      {/* Dedicated "Kelola Kategori" Modal */}
+      {catManagerOpen && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xs">
+          <div className="bg-white dark:bg-slate-900 p-6 rounded-t-3xl sm:rounded-2xl max-w-md w-full border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4 max-h-[88vh] flex flex-col">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Tags className="w-4 h-4 text-emerald-600" />
+                  Kelola Kategori
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Tambah, ubah nama/warna, atau hapus kategori
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCatManagerOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-full"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => handleOpenCatModal()}
+              className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs"
+            >
+              <Plus className="w-4 h-4" />
+              Tambah Kategori Baru
+            </button>
+
+            <div className="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 border border-slate-100 dark:border-slate-800 rounded-2xl">
+              {categories.map((cat) => {
+                const isLainnya = cat.name.trim().toLowerCase() === 'lainnya';
+                const linkedCount = cat.id ? txCountByCategory.get(cat.id) || 0 : 0;
+                return (
+                  <div key={cat.id} className="p-3.5 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-xs"
+                        style={{ backgroundColor: cat.color }}
+                      >
+                        <CategoryIcon name={cat.icon} size={16} className="text-white" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                          {cat.name}
+                        </p>
+                        <p className="text-xs text-slate-400">
+                          {cat.type === 'income'
+                            ? 'Pemasukan'
+                            : cat.type === 'both'
+                            ? 'Keduanya'
+                            : 'Pengeluaran'}{' '}
+                          • {linkedCount} transaksi
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenCatModal(cat)}
+                        className="p-2 rounded-lg text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-slate-800"
+                        title="Edit"
+                      >
+                        <Edit2 className="w-4 h-4" />
+                      </button>
+                      {!isLainnya ? (
+                        <button
+                          type="button"
+                          onClick={() => setDeletingCategory(cat)}
+                          className="p-2 rounded-lg text-slate-500 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-slate-800"
+                          title="Hapus"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      ) : (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400">
+                          Cadangan
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Category Confirmation Modal (Reassigns Transactions to Lainnya) */}
+      {deletingCategory && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl max-w-sm w-full border border-slate-200 dark:border-slate-800 shadow-xl space-y-4">
+            <div className="flex items-center gap-2 text-rose-600">
+              <AlertTriangle className="w-5 h-5 shrink-0" />
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                Hapus Kategori "{deletingCategory.name}"?
+              </h3>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+              {(deletingCategory.id && txCountByCategory.get(deletingCategory.id)) || 0} transaksi terkait kategori ini akan dipindahkan ke kategori default <strong>"Lainnya"</strong>. Data transaksi Anda tetap aman dan tidak akan terhapus.
+            </p>
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="button"
+                disabled={isDeletingCategory}
+                onClick={handleConfirmDeleteCategory}
+                className="w-full py-3 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold disabled:opacity-50"
+              >
+                {isDeletingCategory ? 'Memindahkan & Menghapus...' : 'Ya, Pindahkan Transaksi & Hapus'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeletingCategory(null)}
+                className="w-full py-2.5 px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300"
+              >
+                Batal
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Confirmation Modal for Impor Data */}
       {pendingImportData && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
@@ -720,7 +923,7 @@ export const Pengaturan: React.FC = () => {
 
       {/* Add / Edit Category Modal */}
       {catModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
           <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl max-w-sm w-full border border-slate-200 dark:border-slate-800 shadow-xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
@@ -789,9 +992,20 @@ export const Pengaturan: React.FC = () => {
 
               {/* Color selector */}
               <div>
-                <label className="block text-xs font-bold uppercase text-slate-500 mb-1">
-                  Pilih Warna
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-bold uppercase text-slate-500">
+                    Pilih Warna
+                  </label>
+                  <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500 cursor-pointer">
+                    <span>Warna Kustom:</span>
+                    <input
+                      type="color"
+                      value={catColor}
+                      onChange={(e) => setCatColor(e.target.value)}
+                      className="w-6 h-6 rounded border-0 bg-transparent cursor-pointer p-0"
+                    />
+                  </label>
+                </div>
                 <div className="flex flex-wrap gap-2">
                   {COLOR_OPTIONS.map((col) => (
                     <button

@@ -349,3 +349,67 @@ export async function transferBetweenWallets(params: {
     return transferId as number;
   });
 }
+
+/**
+ * Safely delete a category after reassigning all associated transactions to default "Lainnya" category.
+ */
+export async function deleteCategoryAndReassign(
+  categoryId: number
+): Promise<{ reassignedCount: number; fallbackCategoryName: string }> {
+  return await db.transaction('rw', [db.categories, db.transactions, db.budgets], async () => {
+    const targetCat = await db.categories.get(categoryId);
+    if (!targetCat) {
+      throw new Error('Kategori tidak ditemukan.');
+    }
+
+    if (targetCat.name.trim().toLowerCase() === 'lainnya') {
+      throw new Error('Kategori default "Lainnya" tidak dapat dihapus karena digunakan sebagai kategori cadangan.');
+    }
+
+    const allCats = await db.categories.toArray();
+    let fallbackCat = allCats.find((c) => c.name.trim().toLowerCase() === 'lainnya');
+
+    if (!fallbackCat?.id) {
+      const newFallbackId = await db.categories.add({
+        name: 'Lainnya',
+        icon: 'MoreHorizontal',
+        color: '#64748b',
+        isDefault: true,
+        type: 'both',
+      });
+      fallbackCat = {
+        id: newFallbackId as number,
+        name: 'Lainnya',
+        icon: 'MoreHorizontal',
+        color: '#64748b',
+        isDefault: true,
+        type: 'both',
+      };
+    }
+
+    const fallbackId = fallbackCat.id!;
+    const linkedTxs = await db.transactions.where('categoryId').equals(categoryId).toArray();
+
+    for (const tx of linkedTxs) {
+      if (tx.id) {
+        await db.transactions.update(tx.id, { categoryId: fallbackId });
+      }
+    }
+
+    // Remove budgets tied strictly to the deleted category so no orphaned budget rows remain
+    const linkedBudgets = await db.budgets.where('categoryId').equals(categoryId).toArray();
+    for (const b of linkedBudgets) {
+      if (b.id) {
+        await db.budgets.delete(b.id);
+      }
+    }
+
+    await db.categories.delete(categoryId);
+
+    return {
+      reassignedCount: linkedTxs.length,
+      fallbackCategoryName: fallbackCat.name,
+    };
+  });
+}
+

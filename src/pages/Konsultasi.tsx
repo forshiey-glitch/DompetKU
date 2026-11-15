@@ -202,7 +202,14 @@ export const Konsultasi: React.FC = () => {
         }),
       });
 
-      const data = await response.json();
+      const rawText = await response.text();
+      let data: any;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        throw new Error(`Server tidak mengembalikan JSON valid (HTTP ${response.status}).`);
+      }
+
       if (!response.ok || !data.success) {
         throw new Error(data.error || 'Gagal menerima tanggapan dari asisten AI.');
       }

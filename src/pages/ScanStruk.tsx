@@ -74,7 +74,7 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
         const img = new Image();
         img.onerror = () => resolve(rawDataUrl);
         img.onload = () => {
-          const maxDim = 1400;
+          const maxDim = 1200;
           let { width, height } = img;
           if (width > maxDim || height > maxDim) {
             if (width >= height) {
@@ -96,7 +96,7 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
           ctx.fillStyle = '#ffffff';
           ctx.fillRect(0, 0, width, height);
           ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL('image/jpeg', 0.85));
+          resolve(canvas.toDataURL('image/jpeg', 0.82));
         };
         img.src = rawDataUrl;
       };
@@ -144,7 +144,7 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
     setErrorMessage(null);
 
     try {
-      const response = await fetch('/api/scan-receipt', {
+      const response = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -153,7 +153,13 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
         }),
       });
 
-      const data = await response.json();
+      const rawText = await response.text();
+      let data: any;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        throw new Error(`Server tidak mengembalikan JSON valid (HTTP ${response.status}).`);
+      }
 
       if (!response.ok || !data.success) {
         throw new Error(data.error || 'Gagal memproses struk dengan AI.');

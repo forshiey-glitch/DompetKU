@@ -12,6 +12,7 @@ import {
   ArrowUp,
   ArrowDown,
   Printer,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { db, Transaction, Category } from '../db';
 import { useLiveQuery } from 'dexie-react-hooks';
@@ -22,6 +23,8 @@ import {
   calculatePercentageChange,
   exportToCsv,
 } from '../utils/format';
+import { exportToExcel } from '../utils/exportExcel';
+import { useToast } from '../context/ToastContext';
 import {
   ResponsiveContainer,
   PieChart,
@@ -45,12 +48,18 @@ type PeriodFilter = 'week' | 'month' | '3months' | 'year';
 
 export const RekapBulanan: React.FC<RekapBulananProps> = ({ onOpenAddModal }) => {
   const { userId } = useAuth();
+  const { showToast } = useToast();
   const allTransactions = useLiveQuery(() => db.transactions.toArray()) || [];
   const categories = useLiveQuery(() => db.categories.toArray()) || [];
+  const allWallets = useLiveQuery(() => db.wallets.toArray()) || [];
 
   const transactions = useMemo(() => {
     return allTransactions.filter((t) => t.userId === userId);
   }, [allTransactions, userId]);
+
+  const wallets = useMemo(() => {
+    return allWallets.filter((w) => w.userId === userId);
+  }, [allWallets, userId]);
 
   const now = new Date();
   const currentYm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -314,6 +323,24 @@ export const RekapBulanan: React.FC<RekapBulananProps> = ({ onOpenAddModal }) =>
               <span className="hidden sm:inline">Ekspor CSV</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => {
+              const filename = exportToExcel({
+                transactions: filteredPeriodTransactions,
+                categories,
+                wallets,
+                periodLabel,
+                yearMonth: selectedYm,
+              });
+              showToast(`File Excel "${filename}" berhasil diunduh!`, 'success');
+            }}
+            className="p-2.5 rounded-2xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors"
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>Ekspor ke Excel</span>
+          </button>
 
           <button
             type="button"
