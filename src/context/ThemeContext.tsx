@@ -1,5 +1,4 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { db } from '../db';
 
 type Theme = 'light' | 'dark';
 
@@ -9,27 +8,24 @@ interface ThemeContextValue {
   setTheme: (t: Theme) => void;
 }
 
+const THEME_STORAGE_KEY = 'uangku-theme';
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
-export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [theme, setThemeState] = useState<Theme>('light');
-
-  useEffect(() => {
-    // Load theme from DB or localStorage or system preference
-    async function loadTheme() {
-      try {
-        const setting = await db.settings.get('theme');
-        if (setting && (setting.value === 'light' || setting.value === 'dark')) {
-          setThemeState(setting.value);
-        } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-          setThemeState('dark');
-        }
-      } catch {
-        // Fallback
-      }
+function getInitialTheme(): Theme {
+  if (typeof window === 'undefined') return 'light';
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === 'dark' || stored === 'light') {
+      return stored;
     }
-    loadTheme();
-  }, []);
+  } catch {
+    // Ignore storage read error
+  }
+  return 'light';
+}
+
+export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [theme, setThemeState] = useState<Theme>(getInitialTheme);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -38,8 +34,11 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } else {
       root.classList.remove('dark');
     }
-    // Save to settings
-    db.settings.put({ key: 'theme', value: theme }).catch(() => {});
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Ignore storage write error
+    }
   }, [theme]);
 
   const toggleTheme = () => {

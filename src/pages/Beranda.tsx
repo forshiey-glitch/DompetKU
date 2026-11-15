@@ -11,8 +11,16 @@ import {
   Calendar,
   Sparkles,
   ChevronRight,
+  HandCoins,
 } from 'lucide-react';
-import { db, Transaction, Category, RecurringBill, SavingsGoal } from '../db';
+import {
+  db,
+  Transaction,
+  Category,
+  RecurringBill,
+  addTransactionWithWallet,
+  ensureDefaultWallet,
+} from '../db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { formatRupiah, formatDateIndo, getDaysLeft } from '../utils/format';
 import { useToast } from '../context/ToastContext';
@@ -38,19 +46,33 @@ export const Beranda: React.FC<BerandaProps> = ({ onOpenAddModal, onNavigate }) 
   const categories = useLiveQuery(() => db.categories.toArray()) || [];
   const allSavingsGoals = useLiveQuery(() => db.savingsGoals.toArray()) || [];
   const allRecurringBills = useLiveQuery(() => db.recurringBills.toArray()) || [];
+  const allWallets = useLiveQuery(() => db.wallets.toArray()) || [];
+  const allDebts = useLiveQuery(() => db.debts.toArray()) || [];
 
-  // Scoped to current active user
+  // Scoped strictly to current active user
   const transactions = useMemo(() => {
-    return allTransactions.filter((t) => !t.userId || t.userId === userId || t.userId === 'default-user');
+    return allTransactions.filter((t) => t.userId === userId);
   }, [allTransactions, userId]);
 
   const savingsGoals = useMemo(() => {
-    return allSavingsGoals.filter((g) => !g.userId || g.userId === userId || g.userId === 'default-user');
+    return allSavingsGoals.filter((g) => g.userId === userId);
   }, [allSavingsGoals, userId]);
 
   const recurringBills = useMemo(() => {
-    return allRecurringBills.filter((b) => !b.userId || b.userId === userId || b.userId === 'default-user');
+    return allRecurringBills.filter((b) => b.userId === userId);
   }, [allRecurringBills, userId]);
+
+  const wallets = useMemo(() => {
+    return allWallets.filter((w) => w.userId === userId);
+  }, [allWallets, userId]);
+
+  const unpaidDebtsCount = useMemo(() => {
+    return allDebts.filter((d) => d.userId === userId && !d.isPaid).length;
+  }, [allDebts, userId]);
+
+  const totalWalletBalance = useMemo(() => {
+    return wallets.reduce((acc, w) => acc + (w.balance || 0), 0);
+  }, [wallets]);
 
   // Category map
   const categoryMap = useMemo(() => {
@@ -101,10 +123,14 @@ export const Beranda: React.FC<BerandaProps> = ({ onOpenAddModal, onNavigate }) 
   // Mark bill as paid action
   const handlePayBill = async (bill: RecurringBill) => {
     try {
+      await ensureDefaultWallet(userId);
+      const userWallets = await db.wallets.where('userId').equals(userId).toArray();
+      const defaultWalletId = userWallets[0]?.id;
       const tagihanCat = categories.find((c) => c.name.toLowerCase().includes('tagihan')) || categories[0];
 
-      await db.transactions.add({
+      await addTransactionWithWallet({
         userId,
+        walletId: defaultWalletId,
         type: 'expense',
         amount: bill.amount,
         date: new Date().toISOString().split('T')[0],
@@ -126,18 +152,18 @@ export const Beranda: React.FC<BerandaProps> = ({ onOpenAddModal, onNavigate }) 
   };
 
   return (
-    <div className="space-y-6 sm:space-y-8 pb-28 max-w-4xl mx-auto animate-in fade-in duration-300">
+    <div className="space-y-6 pb-8 w-full animate-in fade-in duration-300">
       {/* Top Greeting & User Badge */}
-      <div className="flex items-center justify-between pt-1">
-        <div>
+      <div className="flex items-center justify-between gap-2 pt-1">
+        <div className="min-w-0">
           <span className="text-xs font-semibold tracking-wider uppercase text-emerald-600 dark:text-emerald-400">
             {formatDateIndo(new Date().toISOString().split('T')[0])}
           </span>
-          <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+          <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight truncate">
             Ringkasan Keuangan
           </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400 truncate max-w-[240px] sm:max-w-none">
-            {isDemoUser ? 'Mode Demo Lokal' : `@${username} • ${userEmail}`}
+          <p className="text-xs text-slate-500 dark:text-slate-400 truncate">
+            {isDemoUser ? 'Mode Tamu' : `@${username} • ${userEmail}`}
           </p>
         </div>
 
@@ -231,6 +257,57 @@ export const Beranda: React.FC<BerandaProps> = ({ onOpenAddModal, onNavigate }) 
           </div>
           Catat Pemasukan
         </button>
+      </div>
+
+      {/* DOMPET & HUTANG QUICK OVERVIEW */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Wallet className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+            <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+              Dompet Saya ({formatRupiah(totalWalletBalance)})
+            </h2>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => onNavigate('debts')}
+              className="text-xs font-semibold text-amber-600 dark:text-amber-400 hover:underline flex items-center gap-1"
+            >
+              <HandCoins className="w-3.5 h-3.5" />
+              Hutang {unpaidDebtsCount > 0 ? `(${unpaidDebtsCount})` : ''}
+            </button>
+            <button
+              onClick={() => onNavigate('wallets')}
+              className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-0.5"
+            >
+              Kelola <ChevronRight className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex gap-3 overflow-x-auto pb-1 no-scrollbar snap-x">
+          {wallets.map((w) => (
+            <button
+              key={w.id}
+              type="button"
+              onClick={() => onNavigate('wallets')}
+              className="min-w-[155px] p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 shadow-xs text-left shrink-0 snap-start hover:border-indigo-300 transition-colors"
+            >
+              <div className="flex items-center gap-2 mb-1.5">
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ backgroundColor: w.color || '#10b981' }}
+                />
+                <span className="text-xs font-bold text-slate-700 dark:text-slate-200 truncate">
+                  {w.name}
+                </span>
+              </div>
+              <p className="text-sm font-extrabold text-slate-900 dark:text-white truncate">
+                {formatRupiah(w.balance)}
+              </p>
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* TAGIHAN DALAM BENTUK HORIZONTAL SCROLL (ANTI-MENUMPUK DI MOBILE) */}
@@ -411,20 +488,19 @@ export const Beranda: React.FC<BerandaProps> = ({ onOpenAddModal, onNavigate }) 
                 <div
                   key={t.id}
                   onClick={() => onOpenAddModal(t)}
-                  className="flex items-center justify-between p-4 hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition-colors cursor-pointer"
+                  className="flex items-center justify-between gap-3 p-4 hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition-colors cursor-pointer"
                 >
-                  <div className="min-w-0 pr-3">
-                    <p className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white truncate">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-bold text-slate-900 dark:text-white truncate">
                       {t.note || cat?.name || 'Transaksi'}
                     </p>
-                    {/* Teks sekunder 12px (text-xs) tanpa visual clutter di mobile */}
-                    <p className="text-xs text-slate-400 mt-0.5">
+                    <p className="text-xs text-slate-400 mt-0.5 truncate">
                       {cat?.name} • {formatDateIndo(t.date, { showDay: false })}
                     </p>
                   </div>
 
                   <span
-                    className={`text-xs sm:text-sm font-extrabold shrink-0 ${
+                    className={`text-sm font-extrabold shrink-0 text-right ${
                       t.type === 'income'
                         ? 'text-emerald-600 dark:text-emerald-400'
                         : 'text-slate-900 dark:text-white'

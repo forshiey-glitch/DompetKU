@@ -1,10 +1,35 @@
 import Dexie, { Table } from 'dexie';
 
 export type TransactionType = 'income' | 'expense';
+export type WalletType = 'cash' | 'bank' | 'ewallet';
+export type DebtType = 'hutang' | 'piutang';
+
+export interface Wallet {
+  id?: number;
+  userId?: string;
+  name: string;
+  type: WalletType;
+  balance: number;
+  initialBalance: number;
+  color: string;
+  createdAt: number;
+}
+
+export interface WalletTransfer {
+  id?: number;
+  userId?: string;
+  fromWalletId: number;
+  toWalletId: number;
+  amount: number;
+  date: string; // 'YYYY-MM-DD'
+  note: string;
+  createdAt: number;
+}
 
 export interface Transaction {
   id?: number;
   userId?: string;
+  walletId?: number;
   type: TransactionType;
   amount: number;
   date: string; // 'YYYY-MM-DD'
@@ -48,6 +73,19 @@ export interface RecurringBill {
   lastPaidMonth?: string; // 'YYYY-MM'
 }
 
+export interface Debt {
+  id?: number;
+  userId?: string;
+  type: DebtType; // 'hutang' = saya pinjam, 'piutang' = orang pinjam
+  personName: string;
+  amount: number;
+  dueDate?: string;
+  note?: string;
+  isPaid: boolean;
+  paidAt?: number;
+  createdAt: number;
+}
+
 export interface Setting {
   key: string;
   value: any;
@@ -61,7 +99,7 @@ export interface LocalUser {
   createdAt: number;
 }
 
-export class DompetKuDatabase extends Dexie {
+export class UangkuDatabase extends Dexie {
   transactions!: Table<Transaction, number>;
   categories!: Table<Category, number>;
   budgets!: Table<Budget, number>;
@@ -69,26 +107,13 @@ export class DompetKuDatabase extends Dexie {
   recurringBills!: Table<RecurringBill, number>;
   settings!: Table<Setting, string>;
   users!: Table<LocalUser, number>;
+  wallets!: Table<Wallet, number>;
+  transfers!: Table<WalletTransfer, number>;
+  debts!: Table<Debt, number>;
 
   constructor() {
-    super('DompetKuDB');
+    super('UangkuDB');
     this.version(1).stores({
-      transactions: '++id, type, amount, date, categoryId, createdAt',
-      categories: '++id, name, isDefault',
-      budgets: '++id, categoryId',
-      savingsGoals: '++id, name, deadline',
-      recurringBills: '++id, name, dueDay, lastPaidMonth',
-      settings: 'key',
-    });
-    this.version(2).stores({
-      transactions: '++id, userId, type, amount, date, categoryId, createdAt',
-      categories: '++id, userId, name, isDefault',
-      budgets: '++id, userId, categoryId',
-      savingsGoals: '++id, userId, name, deadline',
-      recurringBills: '++id, userId, name, dueDay, lastPaidMonth',
-      settings: 'key',
-    });
-    this.version(3).stores({
       transactions: '++id, userId, type, amount, date, categoryId, createdAt',
       categories: '++id, userId, name, isDefault',
       budgets: '++id, userId, categoryId',
@@ -97,10 +122,22 @@ export class DompetKuDatabase extends Dexie {
       settings: 'key',
       users: '++id, username, email, userId',
     });
+    this.version(2).stores({
+      transactions: '++id, userId, walletId, type, amount, date, categoryId, createdAt',
+      categories: '++id, userId, name, isDefault',
+      budgets: '++id, userId, categoryId',
+      savingsGoals: '++id, userId, name, deadline',
+      recurringBills: '++id, userId, name, dueDay, lastPaidMonth',
+      settings: 'key',
+      users: '++id, username, email, userId',
+      wallets: '++id, userId, name, type, createdAt',
+      transfers: '++id, userId, fromWalletId, toWalletId, date, createdAt',
+      debts: '++id, userId, type, isPaid, dueDate, createdAt',
+    });
   }
 }
 
-export const db = new DompetKuDatabase();
+export const db = new UangkuDatabase();
 
 /**
  * Lookup email from username in local IndexedDB
@@ -118,9 +155,15 @@ export async function saveLocalUser(username: string, email: string, userId?: st
   const cleanUsername = username.trim().toLowerCase();
   const cleanEmail = email.trim().toLowerCase();
 
-  const existing = await db.users.where('username').equalsIgnoreCase(cleanUsername).first();
+  const existingByUid = userId
+    ? await db.users.where('userId').equals(userId).first()
+    : undefined;
+  const existingByName = await db.users.where('username').equalsIgnoreCase(cleanUsername).first();
+  const existing = existingByUid || existingByName;
+
   if (existing?.id) {
     await db.users.update(existing.id, {
+      username: cleanUsername,
       email: cleanEmail,
       userId: userId || existing.userId,
     });
@@ -134,7 +177,7 @@ export async function saveLocalUser(username: string, email: string, userId?: st
   }
 }
 
-// Default 8 categories required by specification + default income category
+// Default categories (no dummy transactions, budgets, savings, or bills are seeded)
 export const DEFAULT_CATEGORIES: Omit<Category, 'id'>[] = [
   { name: 'Makan', icon: 'Utensils', color: '#f97316', isDefault: true, type: 'expense' },
   { name: 'Transport', icon: 'Car', color: '#3b82f6', isDefault: true, type: 'expense' },
@@ -148,18 +191,13 @@ export const DEFAULT_CATEGORIES: Omit<Category, 'id'>[] = [
 ];
 
 /**
- * Initializes database with default categories and sample starting data if fresh.
+ * Initializes database with ONLY default categories and default currency setting.
+ * User transactions, budgets, savings goals, and recurring bills start completely empty.
  */
 export async function initializeDatabase() {
   const categoryCount = await db.categories.count();
   if (categoryCount === 0) {
     await db.categories.bulkAdd(DEFAULT_CATEGORIES as Category[]);
-  }
-
-  // Check if we need default settings
-  const themeSetting = await db.settings.get('theme');
-  if (!themeSetting) {
-    await db.settings.put({ key: 'theme', value: 'light' });
   }
 
   const currencySetting = await db.settings.get('currency');
@@ -169,147 +207,145 @@ export async function initializeDatabase() {
 }
 
 /**
- * Seed realistic Indonesian sample data for demonstration / quick start
+ * Ensures a new user has one empty default wallet ("Tunai" with Rp 0) if they have never initialized wallets.
  */
-export async function seedSampleData(userId = 'default-user') {
-  const count = await db.transactions.count();
-  if (count > 0) return;
-
-  const categories = await db.categories.toArray();
-  const catMap: Record<string, number> = {};
-  categories.forEach((c) => {
-    if (c.id) catMap[c.name] = c.id;
-  });
-
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const prevMonth = String(now.getMonth() === 0 ? 12 : now.getMonth()).padStart(2, '0');
-  const prevYear = now.getMonth() === 0 ? year - 1 : year;
-
-  // Add sample transactions
-  await db.transactions.bulkAdd([
-    {
+export async function ensureDefaultWallet(userId: string) {
+  if (!userId || userId === 'guest') return;
+  const flagKey = `uangku-wallet-init-${userId}`;
+  if (typeof window !== 'undefined' && window.localStorage.getItem(flagKey)) {
+    return;
+  }
+  const existingCount = await db.wallets.where('userId').equals(userId).count();
+  if (existingCount === 0) {
+    await db.wallets.add({
       userId,
-      type: 'income',
-      amount: 8500000,
-      date: `${year}-${month}-01`,
-      categoryId: catMap['Gaji & Pendapatan'] || 9,
-      note: 'Gaji Bulanan',
-      createdAt: Date.now() - 86400000 * 2,
-    },
-    {
-      type: 'expense',
-      amount: 45000,
-      date: `${year}-${month}-01`,
-      categoryId: catMap['Makan'] || 1,
-      note: 'Makan Siang Nasi Padang',
-      createdAt: Date.now() - 86400000 * 2,
-    },
-    {
-      type: 'expense',
-      amount: 120000,
-      date: `${year}-${month}-02`,
-      categoryId: catMap['Transport'] || 2,
-      note: 'Bensin Motor & Parkir',
-      createdAt: Date.now() - 86400000,
-    },
-    {
-      type: 'expense',
-      amount: 350000,
-      date: `${year}-${month}-02`,
-      categoryId: catMap['Belanja'] || 3,
-      note: 'Belanja Mingguan Supermarket',
-      createdAt: Date.now() - 86400000,
-    },
-    {
-      type: 'expense',
-      amount: 250000,
-      date: `${year}-${month}-03`,
-      categoryId: catMap['Tagihan'] || 4,
-      note: 'Tagihan Listrik PLN',
+      name: 'Tunai',
+      type: 'cash',
+      balance: 0,
+      initialBalance: 0,
+      color: '#10b981',
       createdAt: Date.now(),
-    },
-    // Previous month sample
-    {
-      type: 'income',
-      amount: 8500000,
-      date: `${prevYear}-${prevMonth}-01`,
-      categoryId: catMap['Gaji & Pendapatan'] || 9,
-      note: 'Gaji Bulan Lalu',
-      createdAt: Date.now() - 86400000 * 32,
-    },
-    {
-      type: 'expense',
-      amount: 1800000,
-      date: `${prevYear}-${prevMonth}-10`,
-      categoryId: catMap['Makan'] || 1,
-      note: 'Total Makan Bulan Lalu',
-      createdAt: Date.now() - 86400000 * 25,
-    },
-    {
-      type: 'expense',
-      amount: 600000,
-      date: `${prevYear}-${prevMonth}-15`,
-      categoryId: catMap['Transport'] || 2,
-      note: 'Transport Bulan Lalu',
-      createdAt: Date.now() - 86400000 * 20,
-    },
-  ]);
-
-  // Add default budgets
-  if (catMap['Makan']) {
-    await db.budgets.add({ categoryId: catMap['Makan'], monthlyLimit: 2000000 });
+    });
   }
-  if (catMap['Transport']) {
-    await db.budgets.add({ categoryId: catMap['Transport'], monthlyLimit: 800000 });
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem(flagKey, '1');
   }
-  if (catMap['Belanja']) {
-    await db.budgets.add({ categoryId: catMap['Belanja'], monthlyLimit: 1500000 });
+}
+
+/**
+ * Add transaction and atomically adjust selected wallet balance
+ */
+export async function addTransactionWithWallet(txData: Omit<Transaction, 'id'>): Promise<number> {
+  return await db.transaction('rw', [db.transactions, db.wallets], async () => {
+    const newId = await db.transactions.add(txData as Transaction);
+    if (txData.walletId) {
+      const wallet = await db.wallets.get(txData.walletId);
+      if (wallet?.id) {
+        const delta = txData.type === 'income' ? txData.amount : -txData.amount;
+        await db.wallets.update(wallet.id, {
+          balance: (wallet.balance || 0) + delta,
+        });
+      }
+    }
+    return newId as number;
+  });
+}
+
+/**
+ * Update transaction and atomically reconcile old & new wallet balances
+ */
+export async function updateTransactionWithWallet(
+  txId: number,
+  newTxData: Omit<Transaction, 'id'>
+): Promise<void> {
+  await db.transaction('rw', [db.transactions, db.wallets], async () => {
+    const oldTx = await db.transactions.get(txId);
+    if (oldTx?.walletId) {
+      const oldWallet = await db.wallets.get(oldTx.walletId);
+      if (oldWallet?.id) {
+        const revertDelta = oldTx.type === 'income' ? -oldTx.amount : oldTx.amount;
+        await db.wallets.update(oldWallet.id, {
+          balance: (oldWallet.balance || 0) + revertDelta,
+        });
+      }
+    }
+
+    await db.transactions.update(txId, newTxData);
+
+    if (newTxData.walletId) {
+      const newWallet = await db.wallets.get(newTxData.walletId);
+      if (newWallet?.id) {
+        const applyDelta = newTxData.type === 'income' ? newTxData.amount : -newTxData.amount;
+        await db.wallets.update(newWallet.id, {
+          balance: (newWallet.balance || 0) + applyDelta,
+        });
+      }
+    }
+  });
+}
+
+/**
+ * Delete transaction and atomically revert its effect on wallet balance
+ */
+export async function deleteTransactionWithWallet(txId: number): Promise<void> {
+  await db.transaction('rw', [db.transactions, db.wallets], async () => {
+    const oldTx = await db.transactions.get(txId);
+    if (oldTx?.walletId) {
+      const wallet = await db.wallets.get(oldTx.walletId);
+      if (wallet?.id) {
+        const revertDelta = oldTx.type === 'income' ? -oldTx.amount : oldTx.amount;
+        await db.wallets.update(wallet.id, {
+          balance: (wallet.balance || 0) + revertDelta,
+        });
+      }
+    }
+    await db.transactions.delete(txId);
+  });
+}
+
+/**
+ * Atomically transfer funds between two wallets and log the transfer
+ */
+export async function transferBetweenWallets(params: {
+  userId: string;
+  fromWalletId: number;
+  toWalletId: number;
+  amount: number;
+  date: string;
+  note?: string;
+}): Promise<number> {
+  const { userId, fromWalletId, toWalletId, amount, date, note = '' } = params;
+  if (fromWalletId === toWalletId) {
+    throw new Error('Dompet asal dan dompet tujuan tidak boleh sama.');
   }
-  if (catMap['Tagihan']) {
-    await db.budgets.add({ categoryId: catMap['Tagihan'], monthlyLimit: 1000000 });
+  if (!amount || amount <= 0) {
+    throw new Error('Nominal transfer harus lebih dari 0.');
   }
 
-  // Add default savings goals
-  const targetDate = new Date();
-  targetDate.setMonth(targetDate.getMonth() + 6);
-  const deadlineStr = targetDate.toISOString().split('T')[0];
+  return await db.transaction('rw', [db.wallets, db.transfers], async () => {
+    const fromWallet = await db.wallets.get(fromWalletId);
+    const toWallet = await db.wallets.get(toWalletId);
+    if (!fromWallet?.id || !toWallet?.id) {
+      throw new Error('Dompet tidak ditemukan.');
+    }
 
-  await db.savingsGoals.bulkAdd([
-    {
-      name: 'Dana Darurat 6 Bulan',
-      targetAmount: 25000000,
-      savedAmount: 12500000,
-      deadline: deadlineStr,
-    },
-    {
-      name: 'Liburan Akhir Tahun',
-      targetAmount: 7000000,
-      savedAmount: 3200000,
-      deadline: `${year}-12-25`,
-    },
-  ]);
+    await db.wallets.update(fromWallet.id, {
+      balance: (fromWallet.balance || 0) - amount,
+    });
+    await db.wallets.update(toWallet.id, {
+      balance: (toWallet.balance || 0) + amount,
+    });
 
-  // Add recurring bills
-  await db.recurringBills.bulkAdd([
-    {
-      name: 'Internet & WiFi Rumah',
-      amount: 375000,
-      dueDay: 10,
-      lastPaidMonth: `${prevYear}-${prevMonth}`,
-    },
-    {
-      name: 'Langganan Streaming (Netflix/Spotify)',
-      amount: 186000,
-      dueDay: 15,
-      lastPaidMonth: `${year}-${month}`,
-    },
-    {
-      name: 'Iuran Pengelolaan Lingkungan (IPL)',
-      amount: 150000,
-      dueDay: 5,
-      lastPaidMonth: `${prevYear}-${prevMonth}`,
-    },
-  ]);
+    const transferId = await db.transfers.add({
+      userId,
+      fromWalletId,
+      toWalletId,
+      amount,
+      date,
+      note: note.trim(),
+      createdAt: Date.now(),
+    });
+
+    return transferId as number;
+  });
 }

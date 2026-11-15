@@ -11,8 +11,13 @@ interface AuthContextType {
   username: string;
   isLoading: boolean;
   isOnline: boolean;
+  isPasswordRecovery: boolean;
+  clearPasswordRecovery: () => void;
   signIn: (identifier: string, password: string, rememberMe?: boolean) => Promise<{ success: boolean; error?: string }>;
   signUp: (email: string, password: string, username: string) => Promise<{ success: boolean; error?: string; requireEmailConfirmation?: boolean }>;
+  requestPasswordReset: (email: string) => Promise<{ success: boolean; error?: string }>;
+  updatePassword: (newPassword: string) => Promise<{ success: boolean; error?: string }>;
+  updateProfile: (newUsername: string) => Promise<{ success: boolean; error?: string }>;
   signOut: () => Promise<void>;
   isDemoUser: boolean;
   loginAsDemoUser: (customUsername?: string) => void;
@@ -20,15 +25,21 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-const LOCAL_FALLBACK_USER_KEY = 'dompetku-local-user';
-const REMEMBER_ME_KEY = 'dompetku-remember-me';
-const SESSION_ACTIVE_KEY = 'dompetku-session-active';
+const LOCAL_FALLBACK_USER_KEY = 'uangku-local-user';
+const REMEMBER_ME_KEY = 'uangku-remember-me';
+const SESSION_ACTIVE_KEY = 'uangku-session-active';
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isDemoUser, setIsDemoUser] = useState(false);
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return window.location.hash.includes('type=recovery');
+    }
+    return false;
+  });
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
@@ -53,14 +64,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       try {
         const rememberMeSetting = localStorage.getItem(REMEMBER_ME_KEY);
         const sessionActive = sessionStorage.getItem(SESSION_ACTIVE_KEY);
+        const isRecoveryUrl = typeof window !== 'undefined' && window.location.hash.includes('type=recovery');
 
-        // If "Remember Me" was disabled AND the tab/browser was closed:
-        // invalidate session on startup
-        if (rememberMeSetting === 'false' && sessionActive !== 'true') {
+        if (!isRecoveryUrl && rememberMeSetting === 'false' && sessionActive !== 'true') {
           if (isSupabaseConfigured) {
             await supabase.auth.signOut().catch(() => {});
           }
-          localStorage.removeItem('dompetku-supabase-auth');
+          localStorage.removeItem('uangku-supabase-auth');
           localStorage.removeItem(LOCAL_FALLBACK_USER_KEY);
           setUser(null);
           setSession(null);
@@ -69,20 +79,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         if (isSupabaseConfigured) {
-          // getSession() restores from localStorage (100% offline auto-login)
           const { data } = await supabase.auth.getSession();
           if (data?.session) {
             setSession(data.session);
             setUser(data.session.user);
             sessionStorage.setItem(SESSION_ACTIVE_KEY, 'true');
 
-            // Cache username locally if present in metadata
             const metaUsername = data.session.user.user_metadata?.username;
             if (metaUsername && data.session.user.email) {
               saveLocalUser(metaUsername, data.session.user.email, data.session.user.id).catch(() => {});
             }
           } else {
-            // Check fallback local user
             const savedLocalUser = localStorage.getItem(LOCAL_FALLBACK_USER_KEY);
             if (savedLocalUser) {
               const parsed = JSON.parse(savedLocalUser);
@@ -92,7 +99,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
           }
         } else {
-          // If Supabase is unconfigured, check demo user
           const savedLocalUser = localStorage.getItem(LOCAL_FALLBACK_USER_KEY);
           if (savedLocalUser) {
             const parsed = JSON.parse(savedLocalUser);
@@ -110,11 +116,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     initAuth();
 
-    // Listen to Supabase auth state changes
     if (isSupabaseConfigured) {
       const {
         data: { subscription },
-      } = supabase.auth.onAuthStateChange((_event, currentSession) => {
+      } = supabase.auth.onAuthStateChange((event, currentSession) => {
+        if (event === 'PASSWORD_RECOVERY') {
+          setIsPasswordRecovery(true);
+        }
         setSession(currentSession);
         setUser(currentSession?.user || null);
         if (currentSession?.user) {
@@ -129,9 +137,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
+  const clearPasswordRecovery = () => {
+    setIsPasswordRecovery(false);
+    if (typeof window !== 'undefined' && window.location.hash.includes('type=recovery')) {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  };
+
   // Sign In with Email OR Username
   const signIn = async (identifier: string, password: string, rememberMe = true) => {
-    // Online check
     if (!navigator.onLine) {
       return {
         success: false,
@@ -146,7 +160,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     let targetEmail = cleanIdentifier.toLowerCase();
 
-    // If identifier is NOT an email (no '@'), look up in local IndexedDB
     if (!cleanIdentifier.includes('@')) {
       const resolvedEmail = await findEmailByUsername(cleanIdentifier);
       if (!resolvedEmail) {
@@ -161,8 +174,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!isSupabaseConfigured) {
       return {
         success: false,
-        error:
-          'Supabase belum dikonfigurasi di file .env. Silakan atur VITE_SUPABASE_URL atau gunakan tombol "Masuk Mode Demo Lokal".',
+        error: 'Layanan autentikasi belum dikonfigurasi. Silakan gunakan tombol "Masuk sebagai Tamu".',
       };
     }
 
@@ -188,11 +200,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setIsDemoUser(false);
         localStorage.removeItem(LOCAL_FALLBACK_USER_KEY);
 
-        // Handle Remember Me preference
         localStorage.setItem(REMEMBER_ME_KEY, rememberMe ? 'true' : 'false');
         sessionStorage.setItem(SESSION_ACTIVE_KEY, 'true');
 
-        // Ensure username is mapped in IndexedDB for subsequent logins
         const metaUsername = data.user.user_metadata?.username;
         if (metaUsername) {
           await saveLocalUser(metaUsername, targetEmail, data.user.id);
@@ -228,8 +238,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!isSupabaseConfigured) {
       return {
         success: false,
-        error:
-          'Supabase belum dikonfigurasi di file .env. Harap atur VITE_SUPABASE_URL atau gunakan "Masuk Mode Demo Lokal".',
+        error: 'Layanan autentikasi belum dikonfigurasi. Silakan gunakan tombol "Masuk sebagai Tamu".',
       };
     }
 
@@ -255,7 +264,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: error.message };
       }
 
-      // Save username & email mapping in IndexedDB
       await saveLocalUser(cleanUsername, cleanEmail, data.user?.id);
 
       if (data.user) {
@@ -285,6 +293,108 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  // Forgot Password: Request reset email
+  const requestPasswordReset = async (email: string) => {
+    if (!navigator.onLine) {
+      return { success: false, error: 'Proses ini memerlukan koneksi internet.' };
+    }
+    if (!isSupabaseConfigured) {
+      return { success: false, error: 'Layanan reset password belum dikonfigurasi.' };
+    }
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      return { success: false, error: 'Masukkan alamat email yang valid.' };
+    }
+
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
+        redirectTo: window.location.origin,
+      });
+      if (error) {
+        return { success: false, error: error.message };
+      }
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Gagal mengirim tautan reset password.' };
+    }
+  };
+
+  // Reset Password: Set new password after recovery
+  const updatePassword = async (newPassword: string) => {
+    if (!navigator.onLine) {
+      return { success: false, error: 'Proses ini memerlukan koneksi internet.' };
+    }
+    if (!isSupabaseConfigured) {
+      return { success: false, error: 'Layanan autentikasi belum dikonfigurasi.' };
+    }
+    if (!newPassword || newPassword.length < 6) {
+      return { success: false, error: 'Kata sandi baru minimal 6 karakter.' };
+    }
+
+    try {
+      const { data, error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) {
+        return { success: false, error: error.message };
+      }
+      if (data.user) {
+        setUser(data.user);
+      }
+      clearPasswordRecovery();
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Gagal memperbarui kata sandi.' };
+    }
+  };
+
+  // Edit Profile: Update username
+  const updateProfile = async (newUsername: string) => {
+    const cleanUsername = newUsername.trim().toLowerCase();
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(cleanUsername)) {
+      return {
+        success: false,
+        error: 'Nama pengguna harus 3-20 karakter (huruf, angka, atau underscore).',
+      };
+    }
+
+    try {
+      if (!isDemoUser && isSupabaseConfigured) {
+        if (!navigator.onLine) {
+          return { success: false, error: 'Mengubah profil akun memerlukan koneksi internet.' };
+        }
+        const { data, error } = await supabase.auth.updateUser({
+          data: {
+            username: cleanUsername,
+            name: cleanUsername,
+          },
+        });
+        if (error) {
+          return { success: false, error: error.message };
+        }
+        if (data.user) {
+          setUser(data.user);
+        }
+      } else if (user) {
+        const updatedDemoUser = {
+          ...user,
+          user_metadata: {
+            ...(user.user_metadata || {}),
+            username: cleanUsername,
+            name: cleanUsername,
+          },
+        } as User;
+        setUser(updatedDemoUser);
+        localStorage.setItem(LOCAL_FALLBACK_USER_KEY, JSON.stringify(updatedDemoUser));
+      }
+
+      if (user?.email) {
+        await saveLocalUser(cleanUsername, user.email, user.id);
+      }
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Gagal memperbarui profil.' };
+    }
+  };
+
   // Sign Out
   const signOut = async () => {
     try {
@@ -295,19 +405,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
       setSession(null);
       setIsDemoUser(false);
+      clearPasswordRecovery();
       localStorage.removeItem(LOCAL_FALLBACK_USER_KEY);
-      localStorage.removeItem('dompetku-supabase-auth');
+      localStorage.removeItem('uangku-supabase-auth');
       localStorage.removeItem(REMEMBER_ME_KEY);
       sessionStorage.removeItem(SESSION_ACTIVE_KEY);
     }
   };
 
-  // Demo user helper
-  const loginAsDemoUser = (customUsername = 'demo_user') => {
+  // Guest mode helper
+  const loginAsDemoUser = (customUsername = 'tamu') => {
     const demoUser = {
-      id: 'demo-user-offline-id',
-      email: 'demo@dompetku.app',
-      user_metadata: { username: customUsername, name: 'Pengguna Demo' },
+      id: 'uangku-guest-id',
+      email: 'tamu@uangku.app',
+      user_metadata: { username: customUsername, name: 'Pengguna Tamu' },
       app_metadata: {},
       aud: 'authenticated',
       created_at: new Date().toISOString(),
@@ -317,7 +428,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsDemoUser(true);
     localStorage.setItem(LOCAL_FALLBACK_USER_KEY, JSON.stringify(demoUser));
     sessionStorage.setItem(SESSION_ACTIVE_KEY, 'true');
-    saveLocalUser(customUsername, 'demo@dompetku.app', 'demo-user-offline-id').catch(() => {});
+    saveLocalUser(customUsername, 'tamu@uangku.app', 'uangku-guest-id').catch(() => {});
   };
 
   const userId = user?.id || 'guest';
@@ -334,8 +445,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         username,
         isLoading,
         isOnline,
+        isPasswordRecovery,
+        clearPasswordRecovery,
         signIn,
         signUp,
+        requestPasswordReset,
+        updatePassword,
+        updateProfile,
         signOut,
         isDemoUser,
         loginAsDemoUser,

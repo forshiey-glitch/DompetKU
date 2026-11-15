@@ -1,20 +1,18 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Camera,
-  Upload,
   Sparkles,
   Check,
-  AlertCircle,
   RefreshCw,
-  Image as ImageIcon,
   DollarSign,
   Calendar,
   Building,
   ShoppingBag,
   ArrowRight,
   WifiOff,
+  Wallet as WalletIcon,
 } from 'lucide-react';
-import { db, Transaction, Category } from '../db';
+import { db, Transaction, ensureDefaultWallet, addTransactionWithWallet } from '../db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { formatRupiah } from '../utils/format';
 import { useToast } from '../context/ToastContext';
@@ -36,13 +34,14 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
   const { showToast } = useToast();
   const { userId } = useAuth();
   const categories = useLiveQuery(() => db.categories.toArray()) || [];
+  const allWallets = useLiveQuery(() => db.wallets.toArray()) || [];
+  const wallets = allWallets.filter((w) => w.userId === userId);
 
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [imageBase64, setImageBase64] = useState<string | null>(null);
   const [mimeType, setMimeType] = useState<string>('image/jpeg');
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [scanResult, setScanResult] = useState<ExtractedReceipt | null>(null);
-  const [providerUsed, setProviderUsed] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Form confirmation state
@@ -50,12 +49,63 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
   const [txDate, setTxDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [totalAmount, setTotalAmount] = useState<number>(0);
   const [selectedCategoryId, setSelectedCategoryId] = useState<number>(0);
+  const [selectedWalletId, setSelectedWalletId] = useState<number>(0);
   const [notes, setNotes] = useState<string>('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    if (userId) ensureDefaultWallet(userId).catch(() => {});
+  }, [userId]);
+
+  useEffect(() => {
+    if (wallets.length > 0 && (!selectedWalletId || !wallets.some((w) => w.id === selectedWalletId))) {
+      if (wallets[0]?.id) setSelectedWalletId(wallets[0].id);
+    }
+  }, [wallets, selectedWalletId]);
+
+  // Normalize any uploaded image into a compressed JPEG Data URL (data:image/jpeg;base64,...)
+  const normalizeToJpegDataUrl = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('Gagal membaca file gambar.'));
+      reader.onload = () => {
+        const rawDataUrl = reader.result as string;
+        const img = new Image();
+        img.onerror = () => resolve(rawDataUrl);
+        img.onload = () => {
+          const maxDim = 1400;
+          let { width, height } = img;
+          if (width > maxDim || height > maxDim) {
+            if (width >= height) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            } else {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(rawDataUrl);
+            return;
+          }
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.85));
+        };
+        img.src = rawDataUrl;
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
   // Handle image selection
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -64,16 +114,16 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
       return;
     }
 
-    setMimeType(file.type);
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      setImagePreview(result);
-      setImageBase64(result);
+    try {
+      const jpegDataUrl = await normalizeToJpegDataUrl(file);
+      setMimeType('image/jpeg');
+      setImagePreview(jpegDataUrl);
+      setImageBase64(jpegDataUrl);
       setScanResult(null);
       setErrorMessage(null);
-    };
-    reader.readAsDataURL(file);
+    } catch (err: any) {
+      showToast(err.message || 'Gagal memproses gambar', 'error');
+    }
   };
 
   // Perform AI OCR via backend proxy
@@ -83,9 +133,9 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
       return;
     }
 
-    // Check offline status
+    // Check network connection
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      setErrorMessage('Fitur ini memerlukan koneksi internet. Anda sedang offline.');
+      setErrorMessage('Fitur ini memerlukan koneksi internet. Periksa sambungan internet Anda.');
       showToast('Fitur ini memerlukan koneksi internet', 'error');
       return;
     }
@@ -111,7 +161,6 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
 
       const receipt = data.data as ExtractedReceipt;
       setScanResult(receipt);
-      setProviderUsed(data.provider || 'AI Vision');
 
       // Autofill fields
       setMerchantName(receipt.merchant || 'Struk Belanja');
@@ -139,7 +188,7 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
       console.error('Scan error:', err);
       const isNetworkErr = err.message.includes('fetch') || err.message.includes('Failed to fetch');
       const msg = isNetworkErr
-        ? 'Fitur ini memerlukan koneksi internet. Gagal menghubungi server proxy.'
+        ? 'Fitur ini memerlukan koneksi internet. Gagal menghubungi server.'
         : err.message || 'Gagal mengekstrak data struk.';
       setErrorMessage(msg);
       showToast(msg, 'error');
@@ -159,10 +208,15 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
       showToast('Pilih kategori transaksi', 'error');
       return;
     }
+    if (!selectedWalletId) {
+      showToast('Pilih dompet terlebih dahulu', 'error');
+      return;
+    }
 
     try {
       const transaction: Omit<Transaction, 'id'> = {
         userId,
+        walletId: selectedWalletId,
         type: 'expense',
         amount: totalAmount,
         date: txDate,
@@ -171,23 +225,23 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
         createdAt: Date.now(),
       };
 
-      const newId = await db.transactions.add(transaction as Transaction);
-      showToast('Transaksi dari struk berhasil disimpan ke DompetKu!', 'success');
-      onSuccessSave({ ...transaction, id: newId as number });
+      const newId = await addTransactionWithWallet(transaction);
+      showToast('Transaksi dari struk berhasil disimpan ke Uangku!', 'success');
+      onSuccessSave({ ...transaction, id: newId });
     } catch (err: any) {
       showToast(err.message || 'Gagal menyimpan transaksi', 'error');
     }
   };
 
   return (
-    <div className="space-y-6 sm:space-y-8 pb-28 max-w-4xl mx-auto animate-in fade-in duration-300">
+    <div className="space-y-6 pb-8 w-full animate-in fade-in duration-300">
       {/* Header */}
-      <div className="pt-2">
+      <div className="pt-1">
         <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-purple-600 dark:text-purple-400">
           <Sparkles className="w-4 h-4" />
           OCR Struk Cerdas
         </div>
-        <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+        <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">
           Scan Struk Belanja
         </h1>
         <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -257,7 +311,7 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
               ) : (
                 <>
                   <Sparkles className="w-4 h-4" />
-                  <span>Scan dengan AI (GLM-4.6V-Flash)</span>
+                  <span>Scan Struk dengan AI</span>
                 </>
               )}
             </button>
@@ -311,16 +365,11 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
                   <Check className="w-4 h-4 text-emerald-600" />
                   Konfirmasi Hasil Scan
                 </span>
-                {providerUsed && (
-                  <span className="text-3xs font-medium px-2 py-0.5 rounded-full bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300">
-                    {providerUsed}
-                  </span>
-                )}
               </div>
 
               {/* Merchant */}
               <div>
-                <label className="block text-2xs font-bold uppercase text-slate-500 mb-1 flex items-center gap-1">
+                <label className="block text-xs font-bold uppercase text-slate-500 mb-1 flex items-center gap-1">
                   <Building className="w-3 h-3" /> Nama Toko / Merchant
                 </label>
                 <input
@@ -332,9 +381,9 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
               </div>
 
               {/* Total & Date */}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-2xs font-bold uppercase text-slate-500 mb-1 flex items-center gap-1">
+                  <label className="block text-xs font-bold uppercase text-slate-500 mb-1 flex items-center gap-1">
                     <DollarSign className="w-3 h-3" /> Total Pengeluaran
                   </label>
                   <input
@@ -346,7 +395,7 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
                   />
                 </div>
                 <div>
-                  <label className="block text-2xs font-bold uppercase text-slate-500 mb-1 flex items-center gap-1">
+                  <label className="block text-xs font-bold uppercase text-slate-500 mb-1 flex items-center gap-1">
                     <Calendar className="w-3 h-3" /> Tanggal Struk
                   </label>
                   <input
@@ -359,22 +408,42 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
                 </div>
               </div>
 
-              {/* Category */}
-              <div>
-                <label className="block text-2xs font-bold uppercase text-slate-500 mb-1">
-                  Kategori
-                </label>
-                <select
-                  value={selectedCategoryId}
-                  onChange={(e) => setSelectedCategoryId(Number(e.target.value))}
-                  className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-white"
-                >
-                  {categories.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
+              {/* Category & Wallet */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold uppercase text-slate-500 mb-1">
+                    Kategori
+                  </label>
+                  <select
+                    value={selectedCategoryId}
+                    onChange={(e) => setSelectedCategoryId(Number(e.target.value))}
+                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-white"
+                  >
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold uppercase text-slate-500 mb-1 flex items-center gap-1">
+                    <WalletIcon className="w-3 h-3" /> Dompet
+                  </label>
+                  <select
+                    value={selectedWalletId}
+                    onChange={(e) => setSelectedWalletId(Number(e.target.value))}
+                    required
+                    className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-white"
+                  >
+                    {wallets.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name} ({formatRupiah(w.balance)})
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               {/* Notes / Item breakdown */}
@@ -410,10 +479,10 @@ export const ScanStruk: React.FC<ScanStrukProps> = ({ onSuccessSave, onManualAdd
               {/* Submit button */}
               <button
                 type="submit"
-                className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs sm:text-sm shadow-md shadow-emerald-600/20 transition-all flex items-center justify-center gap-2"
+                className="w-full py-3.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm shadow-md shadow-emerald-600/20 transition-all flex items-center justify-center gap-2"
               >
                 <Check className="w-4 h-4" />
-                Simpan ke DompetKu
+                Simpan ke Uangku
               </button>
             </form>
           )}

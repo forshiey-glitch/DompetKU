@@ -11,7 +11,7 @@ import {
   AlertTriangle,
   RotateCcw,
 } from 'lucide-react';
-import { db, RecurringBill, Category, Transaction } from '../db';
+import { db, RecurringBill, addTransactionWithWallet, ensureDefaultWallet } from '../db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { formatRupiah, generateIcsFile } from '../utils/format';
 import { useToast } from '../context/ToastContext';
@@ -31,7 +31,7 @@ export const Tagihan: React.FC = () => {
   const categories = useLiveQuery(() => db.categories.toArray()) || [];
 
   const recurringBills = React.useMemo(() => {
-    return allRecurringBills.filter((b) => !b.userId || b.userId === userId || b.userId === 'default-user');
+    return allRecurringBills.filter((b) => b.userId === userId);
   }, [allRecurringBills, userId]);
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -108,11 +108,16 @@ export const Tagihan: React.FC = () => {
   // Mark bill as paid: creates transaction & updates lastPaidMonth
   const handleMarkAsPaid = async (bill: RecurringBill) => {
     try {
+      await ensureDefaultWallet(userId);
+      const userWallets = await db.wallets.where('userId').equals(userId).toArray();
+      const defaultWalletId = userWallets[0]?.id;
+
       const tagihanCat =
         categories.find((c) => c.name.toLowerCase().includes('tagihan')) || categories[0];
 
-      await db.transactions.add({
+      await addTransactionWithWallet({
         userId,
+        walletId: defaultWalletId,
         type: 'expense',
         amount: bill.amount,
         date: new Date().toISOString().split('T')[0],
@@ -162,11 +167,11 @@ export const Tagihan: React.FC = () => {
   const totalMonthlyBills = recurringBills.reduce((acc, b) => acc + b.amount, 0);
 
   return (
-    <div className="space-y-6 sm:space-y-8 pb-28 max-w-4xl mx-auto animate-in fade-in duration-300">
+    <div className="space-y-6 pb-8 w-full animate-in fade-in duration-300">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+          <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">
             Tagihan Berulang
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -386,19 +391,19 @@ export const Tagihan: React.FC = () => {
                 />
               </div>
 
-              <div className="flex gap-2 justify-end pt-2">
+              <div className="flex flex-col gap-2 pt-2">
+                <button
+                  type="submit"
+                  className="w-full py-3 px-4 text-xs sm:text-sm font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm"
+                >
+                  Simpan Tagihan
+                </button>
                 <button
                   type="button"
                   onClick={() => setModalOpen(false)}
-                  className="px-4 py-2 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
+                  className="w-full py-2.5 px-4 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
                 >
                   Batal
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-xs font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white"
-                >
-                  Simpan Tagihan
                 </button>
               </div>
             </form>

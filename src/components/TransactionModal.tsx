@@ -1,6 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { X, ArrowDownRight, ArrowUpRight, Calendar, Tag, FileText, Check } from 'lucide-react';
-import { db, Transaction, Category } from '../db';
+import { X, ArrowDownRight, ArrowUpRight, Calendar, Tag, FileText, Check, Wallet as WalletIcon } from 'lucide-react';
+import {
+  db,
+  Transaction,
+  Category,
+  ensureDefaultWallet,
+  addTransactionWithWallet,
+  updateTransactionWithWallet,
+} from '../db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { CategoryIcon } from './CategoryIcon';
 import { useToast } from '../context/ToastContext';
@@ -24,12 +31,22 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
   const { userId } = useAuth();
   const categories = useLiveQuery(() => db.categories.toArray()) || [];
 
+  const allWallets = useLiveQuery(() => db.wallets.toArray()) || [];
+  const wallets = allWallets.filter((w) => w.userId === userId);
+
   const [type, setType] = useState<'expense' | 'income'>('expense');
   const [amount, setAmount] = useState<string>('');
   const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [categoryId, setCategoryId] = useState<number>(0);
+  const [walletId, setWalletId] = useState<number>(0);
   const [note, setNote] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (isOpen && userId) {
+      ensureDefaultWallet(userId).catch(() => {});
+    }
+  }, [isOpen, userId]);
 
   useEffect(() => {
     if (isOpen) {
@@ -38,12 +55,14 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
         setAmount(initialData.amount ? String(initialData.amount) : '');
         setDate(initialData.date || new Date().toISOString().split('T')[0]);
         setCategoryId(initialData.categoryId || 0);
+        setWalletId(initialData.walletId || 0);
         setNote(initialData.note || '');
       } else {
         setType('expense');
         setAmount('');
         setDate(new Date().toISOString().split('T')[0]);
         setCategoryId(0);
+        setWalletId(0);
         setNote('');
       }
     }
@@ -58,6 +77,13 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       if (defaultCat?.id) setCategoryId(defaultCat.id);
     }
   }, [categories, type, categoryId]);
+
+  // Set default wallet when wallets load if walletId is empty
+  useEffect(() => {
+    if (wallets.length > 0 && (!walletId || !wallets.some((w) => w.id === walletId))) {
+      if (wallets[0]?.id) setWalletId(wallets[0].id);
+    }
+  }, [wallets, walletId]);
 
   if (!isOpen) return null;
 
@@ -87,10 +113,16 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       return;
     }
 
+    if (!walletId) {
+      showToast('Pilih dompet terlebih dahulu', 'error');
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       const transactionData: Omit<Transaction, 'id'> = {
         userId: initialData?.userId || userId,
+        walletId,
         type,
         amount: numAmount,
         date,
@@ -100,13 +132,13 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
       };
 
       if (initialData?.id) {
-        await db.transactions.update(initialData.id, transactionData);
+        await updateTransactionWithWallet(initialData.id, transactionData);
         showToast('Transaksi berhasil diperbarui', 'success');
         onSuccess?.({ ...transactionData, id: initialData.id });
       } else {
-        const newId = await db.transactions.add(transactionData as Transaction);
+        const newId = await addTransactionWithWallet(transactionData);
         showToast('Transaksi berhasil dicatat!', 'success');
-        onSuccess?.({ ...transactionData, id: newId as number });
+        onSuccess?.({ ...transactionData, id: newId });
       }
 
       onClose();
@@ -220,6 +252,30 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
             </div>
           </div>
 
+          {/* Mandatory Wallet Selector */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5 flex items-center gap-1.5">
+              <WalletIcon className="w-3.5 h-3.5" />
+              Dompet / Sumber Dana
+            </label>
+            <select
+              value={walletId}
+              onChange={(e) => setWalletId(Number(e.target.value))}
+              required
+              className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white text-sm font-semibold focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+            >
+              {wallets.length === 0 ? (
+                <option value={0}>Memuat dompet...</option>
+              ) : (
+                wallets.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name} ({formatRupiah(w.balance)})
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+
           {/* Category Selector */}
           <div>
             <div className="flex items-center justify-between mb-1.5">
@@ -275,21 +331,21 @@ export const TransactionModal: React.FC<TransactionModalProps> = ({
           </div>
 
           {/* Submit Actions */}
-          <div className="pt-2 flex gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 py-3 px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold text-sm hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            >
-              Batal
-            </button>
+          <div className="pt-2 flex flex-col gap-2">
             <button
               type="submit"
               disabled={isSubmitting}
-              className="flex-1 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm shadow-md shadow-emerald-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              className="w-full py-3.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm shadow-md shadow-emerald-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
             >
               <Check className="w-4 h-4" />
               {isSubmitting ? 'Menyimpan...' : initialData?.id ? 'Perbarui Transaksi' : 'Simpan Transaksi'}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-full py-2.5 px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold text-sm hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              Batal
             </button>
           </div>
         </form>

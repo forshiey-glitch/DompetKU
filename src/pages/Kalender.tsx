@@ -31,15 +31,15 @@ export const Kalender: React.FC<KalenderProps> = ({ onOpenAddModal }) => {
   const allRecurringBills = useLiveQuery(() => db.recurringBills.toArray()) || [];
 
   const transactions = useMemo(() => {
-    return allTransactions.filter((t) => !t.userId || t.userId === userId || t.userId === 'default-user');
+    return allTransactions.filter((t) => t.userId === userId);
   }, [allTransactions, userId]);
 
   const savingsGoals = useMemo(() => {
-    return allSavingsGoals.filter((g) => !g.userId || g.userId === userId || g.userId === 'default-user');
+    return allSavingsGoals.filter((g) => g.userId === userId);
   }, [allSavingsGoals, userId]);
 
   const recurringBills = useMemo(() => {
-    return allRecurringBills.filter((b) => !b.userId || b.userId === userId || b.userId === 'default-user');
+    return allRecurringBills.filter((b) => b.userId === userId);
   }, [allRecurringBills, userId]);
 
   const today = new Date();
@@ -258,7 +258,7 @@ export const Kalender: React.FC<KalenderProps> = ({ onOpenAddModal }) => {
 
     // Default general reminder
     generateIcsFile(
-      'Agenda Keuangan DompetKu',
+      'Agenda Keuangan Uangku',
       selectedDate,
       `Agenda keuangan tanggal ${formatDateIndo(selectedDate)}`,
       `agenda-${selectedDate}.ics`
@@ -267,11 +267,11 @@ export const Kalender: React.FC<KalenderProps> = ({ onOpenAddModal }) => {
   };
 
   return (
-    <div className="space-y-6 sm:space-y-8 pb-28 max-w-4xl mx-auto animate-in fade-in duration-300">
+    <div className="space-y-6 pb-8 w-full animate-in fade-in duration-300">
       {/* Header & Controls */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+          <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">
             Kalender Keuangan
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400">

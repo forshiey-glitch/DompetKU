@@ -4,14 +4,11 @@ import {
   Sparkles,
   Bot,
   User,
-  AlertTriangle,
   RefreshCw,
-  TrendingDown,
-  TrendingUp,
   ShieldAlert,
-  WifiOff,
+  AlertCircle,
 } from 'lucide-react';
-import { db, Transaction, Category, SavingsGoal, RecurringBill } from '../db';
+import { db, Category } from '../db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { formatRupiah } from '../utils/format';
 import { useToast } from '../context/ToastContext';
@@ -32,34 +29,43 @@ export const Konsultasi: React.FC = () => {
   const categories = useLiveQuery(() => db.categories.toArray()) || [];
   const allSavingsGoals = useLiveQuery(() => db.savingsGoals.toArray()) || [];
   const allRecurringBills = useLiveQuery(() => db.recurringBills.toArray()) || [];
+  const allWallets = useLiveQuery(() => db.wallets.toArray()) || [];
 
-  const transactions = useMemo(() => {
-    return allTransactions.filter((t) => !t.userId || t.userId === userId || t.userId === 'default-user');
-  }, [allTransactions, userId]);
+  const transactions = useMemo(
+    () => allTransactions.filter((t) => t.userId === userId),
+    [allTransactions, userId]
+  );
 
-  const savingsGoals = useMemo(() => {
-    return allSavingsGoals.filter((g) => !g.userId || g.userId === userId || g.userId === 'default-user');
-  }, [allSavingsGoals, userId]);
+  const savingsGoals = useMemo(
+    () => allSavingsGoals.filter((g) => g.userId === userId),
+    [allSavingsGoals, userId]
+  );
 
-  const recurringBills = useMemo(() => {
-    return allRecurringBills.filter((b) => !b.userId || b.userId === userId || b.userId === 'default-user');
-  }, [allRecurringBills, userId]);
+  const recurringBills = useMemo(
+    () => allRecurringBills.filter((b) => b.userId === userId),
+    [allRecurringBills, userId]
+  );
+
+  const wallets = useMemo(
+    () => allWallets.filter((w) => w.userId === userId),
+    [allWallets, userId]
+  );
 
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 'welcome',
       role: 'assistant',
       content:
-        'Halo! Saya **DompetKu AI**, asisten konsultasi keuangan pribadi Anda. Saya telah mempelajari ringkasan pemasukan, pengeluaran, target tabungan, dan tagihan Anda di aplikasi ini. Apa yang ingin Anda diskusikan hari ini?',
+        'Halo! Saya Uangku AI, asisten keuangan pribadi Anda. Saya dapat membantu menganalisis pengeluaran, tabungan, dan tagihan Anda. Apa yang ingin Anda tanyakan hari ini?',
       timestamp: Date.now(),
     },
   ]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll chat to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
@@ -68,9 +74,8 @@ export const Konsultasi: React.FC = () => {
   const financialSummary = useMemo(() => {
     const now = new Date();
     const currYear = now.getFullYear();
-    const currMonth = now.getMonth(); // 0-indexed
+    const currMonth = now.getMonth();
 
-    // Calculate last 3 months keys
     const last3MonthKeys: string[] = [];
     for (let i = 0; i < 3; i++) {
       let m = currMonth - i;
@@ -114,7 +119,6 @@ export const Konsultasi: React.FC = () => {
       if (c.id) categoryMap.set(c.id, c);
     });
 
-    // Top categories
     const topExpenseCategories = Array.from(catExpenseMap.entries())
       .map(([catId, amount]) => ({
         name: categoryMap.get(catId)?.name || 'Lainnya',
@@ -123,7 +127,6 @@ export const Konsultasi: React.FC = () => {
       .sort((a, b) => b.amount - a.amount)
       .slice(0, 4);
 
-    // Savings goals status
     const savingsGoalsStatus = savingsGoals.map((g) => ({
       name: g.name,
       savedAmount: g.savedAmount,
@@ -131,12 +134,13 @@ export const Konsultasi: React.FC = () => {
       percentage: Math.round((g.savedAmount / (g.targetAmount || 1)) * 100),
     }));
 
-    // Upcoming bills
     const upcomingBills = recurringBills.slice(0, 4).map((b) => ({
       name: b.name,
       amount: b.amount,
       dueDay: b.dueDay,
     }));
+
+    const totalWalletBalance = wallets.reduce((acc, w) => acc + (w.balance || 0), 0);
 
     return {
       totalIncome3Months,
@@ -144,36 +148,30 @@ export const Konsultasi: React.FC = () => {
       netSavings3Months: totalIncome3Months - totalExpense3Months,
       currentMonthIncome,
       currentMonthExpense,
+      totalWalletBalance,
       topExpenseCategories,
       savingsGoalsStatus,
       upcomingBills,
     };
-  }, [transactions, categories, savingsGoals, recurringBills]);
+  }, [transactions, categories, savingsGoals, recurringBills, wallets]);
 
-  // Suggested prompt chips
   const suggestedPrompts = [
-    'Bagaimana evaluasi pengeluaran 3 bulan terakhir saya?',
-    'Tips memangkas pos pengeluaran terbesar saya saat ini?',
-    'Apakah target tabungan saya sudah realistis?',
-    'Bantu susun strategi alokasi gaji bulanan yang seimbang',
+    'Evaluasi pengeluaran 3 bulan terakhir saya',
+    'Tips memangkas pengeluaran terbesar',
+    'Apakah target tabungan saya realistis?',
+    'Strategi alokasi gaji bulanan',
   ];
 
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || inputMessage).trim();
     if (!text || isLoading) return;
 
-    // Check offline
+    setErrorBanner(null);
+
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      showToast('Fitur konsultasi AI memerlukan koneksi internet', 'error');
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: String(Date.now()),
-          role: 'assistant',
-          content: '⚠️ Anda sedang offline. Fitur konsultasi AI memerlukan koneksi internet untuk terhubung ke model OpenRouter.',
-          timestamp: Date.now(),
-        },
-      ]);
+      const offlineMsg = 'Fitur konsultasi AI memerlukan koneksi internet aktif.';
+      setErrorBanner(offlineMsg);
+      showToast(offlineMsg, 'error');
       return;
     }
 
@@ -183,6 +181,11 @@ export const Konsultasi: React.FC = () => {
       content: text,
       timestamp: Date.now(),
     };
+
+    const nextHistory = [...messages.slice(-6), userMsg].map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
 
     setMessages((prev) => [...prev, userMsg]);
     setInputMessage('');
@@ -194,10 +197,7 @@ export const Konsultasi: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: text,
-          history: messages.slice(-5).map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
+          history: nextHistory.slice(0, -1),
           financialSummary,
         }),
       });
@@ -218,49 +218,47 @@ export const Konsultasi: React.FC = () => {
       ]);
     } catch (err: any) {
       console.error('Consultation error:', err);
-      const isNetworkErr = err.message.includes('fetch') || err.message.includes('Failed to fetch');
-      const errorReply = isNetworkErr
-        ? '⚠️ Fitur ini memerlukan koneksi internet. Gagal menghubungi server proxy AI.'
-        : `⚠️ Maaf, terjadi kesalahan: ${err.message}. Pastikan OPENROUTER_API_KEY telah dikonfigurasi di file .env.`;
+      const isNetworkErr =
+        err.message?.includes('fetch') || err.message?.includes('Failed to fetch');
+      const errMsg = isNetworkErr
+        ? 'Tidak dapat terhubung ke server AI. Periksa koneksi internet Anda.'
+        : err.message || 'Terjadi kesalahan saat menghubungi layanan AI.';
 
+      setErrorBanner(errMsg);
       setMessages((prev) => [
         ...prev,
         {
           id: String(Date.now() + 1),
           role: 'assistant',
-          content: errorReply,
+          content: `Maaf, permintaan tidak dapat diproses saat ini: ${errMsg}`,
           timestamp: Date.now(),
         },
       ]);
-      showToast('Gagal menghubungi AI Konsultan', 'error');
+      showToast('Gagal menghubungi Konsultan AI', 'error');
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8.5rem)] max-w-4xl mx-auto pb-20 sm:pb-8 animate-in fade-in duration-300">
+    <div className="flex flex-col h-[calc(100dvh-10.5rem)] lg:h-[calc(100dvh-7.5rem)] w-full animate-in fade-in duration-300">
       {/* Header */}
       <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800 shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center shadow-md shadow-emerald-600/20">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center shadow-md shadow-emerald-600/20 shrink-0">
             <Sparkles className="w-5 h-5" />
           </div>
-          <div>
-            <h1 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+          <div className="min-w-0">
+            <h1 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2 truncate">
               Konsultasi Keuangan AI
-              <span className="text-3xs font-semibold px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                OpenRouter Free
-              </span>
             </h1>
-            <p className="text-2xs text-slate-400">
-              Analisis cerdas berdasarkan data pembukuan nyata Anda
+            <p className="text-xs text-slate-400 truncate">
+              Analisis cerdas berdasarkan pembukuan Anda
             </p>
           </div>
         </div>
 
-        {/* Financial Context Pill */}
-        <div className="hidden sm:flex items-center gap-2 text-2xs text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-3 py-1.5 rounded-lg">
+        <div className="hidden sm:flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-3 py-1.5 rounded-lg shrink-0">
           <span>Net 3 Bln:</span>
           <span
             className={`font-bold ${
@@ -272,54 +270,75 @@ export const Konsultasi: React.FC = () => {
         </div>
       </div>
 
-      {/* Professional Advice Disclaimer Banner */}
-      <div className="py-2 px-3 my-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/80 flex items-center gap-2 shrink-0 text-2xs text-amber-800 dark:text-amber-300">
+      {/* Compact Yellow Disclaimer Banner */}
+      <div className="p-3 my-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/80 flex items-center gap-2 shrink-0 text-xs text-amber-800 dark:text-amber-300">
         <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
-        <span className="font-medium">
-          <strong>Perhatian:</strong> Ini bukan saran keuangan profesional berlisensi. Gunakan rekomendasi AI ini sebagai bahan pertimbangan dan edukasi keuangan pribadi Anda.
+        <span>
+          <strong>Perhatian:</strong> Ini saran edukasi AI, bukan nasihat keuangan berlisensi.
         </span>
       </div>
 
-      {/* Chat Messages Container */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs my-1">
+      {/* Error Alert Banner if failed */}
+      {errorBanner && (
+        <div className="p-3 mb-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 flex items-center gap-2 shrink-0 text-xs text-rose-700 dark:text-rose-300">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span className="flex-1">{errorBanner}</span>
+        </div>
+      )}
+
+      {/* WhatsApp-style Chat Messages Container */}
+      <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 rounded-2xl bg-slate-100/70 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
         {messages.map((m) => {
           const isUser = m.role === 'user';
+          const timeStr = new Date(m.timestamp).toLocaleTimeString('id-ID', {
+            hour: '2-digit',
+            minute: '2-digit',
+          });
           return (
             <div
               key={m.id}
-              className={`flex items-start gap-2.5 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}
+              className={`flex items-end gap-2 ${isUser ? 'justify-end' : 'justify-start'}`}
             >
-              <div
-                className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 text-white ${
-                  isUser
-                    ? 'bg-slate-700 dark:bg-slate-600'
-                    : 'bg-emerald-600 shadow-sm'
-                }`}
-              >
-                {isUser ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
-              </div>
+              {!isUser && (
+                <div className="w-7 h-7 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                  <Bot className="w-3.5 h-3.5" />
+                </div>
+              )}
 
               <div
-                className={`max-w-[85%] sm:max-w-[75%] p-3.5 rounded-2xl text-xs sm:text-sm leading-relaxed ${
+                className={`max-w-[82%] sm:max-w-[75%] px-3.5 py-2.5 rounded-2xl text-xs sm:text-sm leading-relaxed shadow-xs ${
                   isUser
-                    ? 'bg-emerald-600 text-white rounded-tr-none'
-                    : 'bg-slate-50 dark:bg-slate-800/80 text-slate-800 dark:text-slate-200 border border-slate-100 dark:border-slate-800 rounded-tl-none whitespace-pre-line'
+                    ? 'bg-emerald-600 text-white rounded-br-sm'
+                    : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 border border-slate-200/80 dark:border-slate-700 rounded-bl-sm whitespace-pre-line'
                 }`}
               >
-                {m.content}
+                <p>{m.content}</p>
+                <p
+                  className={`text-[10px] mt-1 text-right ${
+                    isUser ? 'text-emerald-100/80' : 'text-slate-400'
+                  }`}
+                >
+                  {timeStr}
+                </p>
               </div>
+
+              {isUser && (
+                <div className="w-7 h-7 rounded-full bg-slate-700 dark:bg-slate-600 text-white flex items-center justify-center shrink-0">
+                  <User className="w-3.5 h-3.5" />
+                </div>
+              )}
             </div>
           );
         })}
 
         {isLoading && (
-          <div className="flex items-start gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-              <Bot className="w-4 h-4" />
+          <div className="flex items-end gap-2 justify-start">
+            <div className="w-7 h-7 rounded-full bg-emerald-600 text-white flex items-center justify-center shrink-0">
+              <Bot className="w-3.5 h-3.5" />
             </div>
-            <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-100 dark:border-slate-800 rounded-tl-none flex items-center gap-2 text-xs text-slate-500">
+            <div className="px-3.5 py-2.5 rounded-2xl rounded-bl-sm bg-white dark:bg-slate-800 border border-slate-200/80 dark:border-slate-700 flex items-center gap-2 text-xs text-slate-500">
               <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600" />
-              <span>DompetKu AI sedang memikirkan solusi keuangan Anda...</span>
+              <span>Uangku AI sedang mengetik...</span>
             </div>
           </div>
         )}
@@ -332,36 +351,41 @@ export const Konsultasi: React.FC = () => {
         {suggestedPrompts.map((p, idx) => (
           <button
             key={idx}
+            type="button"
             disabled={isLoading}
             onClick={() => handleSendMessage(p)}
-            className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-2xs font-medium whitespace-nowrap transition-colors border border-slate-200 dark:border-slate-700 shrink-0"
+            className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium whitespace-nowrap transition-colors border border-slate-200 dark:border-slate-700 shrink-0"
           >
             {p}
           </button>
         ))}
       </div>
 
-      {/* Input Box */}
-      <div className="flex items-center gap-2 pt-1 shrink-0">
+      {/* Side-by-side Input & Send Button cleanly aligned above bottom nav */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          handleSendMessage();
+        }}
+        className="flex items-center gap-2 pt-1 pb-2 shrink-0"
+      >
         <input
           type="text"
           value={inputMessage}
           onChange={(e) => setInputMessage(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') handleSendMessage();
-          }}
           disabled={isLoading}
-          placeholder="Tanyakan analisis keuangan, tips hemat, atau saran tabungan..."
-          className="flex-1 px-4 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs sm:text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 shadow-xs"
+          placeholder="Ketik pertanyaan keuangan..."
+          className="flex-1 min-w-0 px-4 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 shadow-xs"
         />
         <button
-          onClick={() => handleSendMessage()}
+          type="submit"
           disabled={!inputMessage.trim() || isLoading}
-          className="p-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40 transition-all shadow-md shadow-emerald-600/20"
+          aria-label="Kirim Pesan"
+          className="h-11 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40 transition-all shadow-md shadow-emerald-600/20 flex items-center justify-center shrink-0"
         >
-          <Send className="w-5 h-5" />
+          <Send className="w-4 h-4" />
         </button>
-      </div>
+      </form>
     </div>
   );
 };

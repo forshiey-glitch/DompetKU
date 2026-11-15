@@ -11,7 +11,7 @@ import {
   TrendingUp,
   Download,
 } from 'lucide-react';
-import { db, Transaction, Category } from '../db';
+import { db, Transaction, Category, Wallet, deleteTransactionWithWallet } from '../db';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { formatRupiah, formatDateIndo, exportToCsv } from '../utils/format';
 import { CategoryIcon } from '../components/CategoryIcon';
@@ -28,10 +28,19 @@ export const Transaksi: React.FC<TransaksiProps> = ({ onOpenAddModal }) => {
 
   const allTransactions = useLiveQuery(() => db.transactions.orderBy('date').reverse().toArray()) || [];
   const categories = useLiveQuery(() => db.categories.toArray()) || [];
+  const allWallets = useLiveQuery(() => db.wallets.toArray()) || [];
 
   const transactions = useMemo(() => {
-    return allTransactions.filter((t) => !t.userId || t.userId === userId || t.userId === 'default-user');
+    return allTransactions.filter((t) => t.userId === userId);
   }, [allTransactions, userId]);
+
+  const walletMap = useMemo(() => {
+    const map = new Map<number, Wallet>();
+    allWallets.forEach((w) => {
+      if (w.id) map.set(w.id, w);
+    });
+    return map;
+  }, [allWallets]);
 
   // Filter States
   const [searchTerm, setSearchTerm] = useState('');
@@ -139,7 +148,7 @@ export const Transaksi: React.FC<TransaksiProps> = ({ onOpenAddModal }) => {
   // Delete transaction handler
   const handleDeleteTransaction = async (id: number) => {
     try {
-      await db.transactions.delete(id);
+      await deleteTransactionWithWallet(id);
       showToast('Transaksi berhasil dihapus', 'info');
       setDeletingId(null);
     } catch (err: any) {
@@ -166,11 +175,11 @@ export const Transaksi: React.FC<TransaksiProps> = ({ onOpenAddModal }) => {
     Boolean(searchTerm);
 
   return (
-    <div className="space-y-6 pb-28 max-w-4xl mx-auto animate-in fade-in duration-300">
+    <div className="space-y-5 pb-8 w-full animate-in fade-in duration-300">
       {/* Top Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+          <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">
             Daftar Transaksi
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -313,7 +322,7 @@ export const Transaksi: React.FC<TransaksiProps> = ({ onOpenAddModal }) => {
           </div>
 
           {/* Amount range */}
-          <div className="grid grid-cols-2 gap-3 pt-1">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
             <div>
               <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
                 Nominal Minimal (Rp)
@@ -323,7 +332,7 @@ export const Transaksi: React.FC<TransaksiProps> = ({ onOpenAddModal }) => {
                 placeholder="0"
                 value={minAmount}
                 onChange={(e) => setMinAmount(e.target.value)}
-                className="w-full p-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-white"
+                className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-white"
               />
             </div>
             <div>
@@ -335,7 +344,7 @@ export const Transaksi: React.FC<TransaksiProps> = ({ onOpenAddModal }) => {
                 placeholder="Tak terbatas"
                 value={maxAmount}
                 onChange={(e) => setMaxAmount(e.target.value)}
-                className="w-full p-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-white"
+                className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-white"
               />
             </div>
           </div>
@@ -403,10 +412,12 @@ export const Transaksi: React.FC<TransaksiProps> = ({ onOpenAddModal }) => {
                   return (
                     <div
                       key={t.id}
-                      className="flex items-center justify-between p-4 hover:bg-slate-50/60 dark:hover:bg-slate-800/30 transition-colors group"
+                      className="flex items-center justify-between gap-3 p-4 hover:bg-slate-50/60 dark:hover:bg-slate-800/30 transition-colors group"
                     >
-                      <div className="flex items-center gap-3 min-w-0 pr-3">
-                        {/* Desktop icon */}
+                      <div
+                        onClick={() => onOpenAddModal(t)}
+                        className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
+                      >
                         <div
                           className="hidden sm:flex w-10 h-10 rounded-xl items-center justify-center shrink-0 shadow-xs"
                           style={{ backgroundColor: cat?.color || '#64748b' }}
@@ -414,25 +425,23 @@ export const Transaksi: React.FC<TransaksiProps> = ({ onOpenAddModal }) => {
                           <CategoryIcon name={cat?.icon || 'MoreHorizontal'} size={18} className="text-white" />
                         </div>
 
-                        {/* Mobile minimalist color dot */}
-                        <div
-                          className="sm:hidden w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: cat?.color || '#64748b' }}
-                        />
-
-                        <div className="min-w-0">
-                          <p className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white truncate">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-bold text-slate-900 dark:text-white truncate">
                             {t.note || cat?.name || 'Transaksi'}
                           </p>
-                          <p className="text-xs text-slate-400">
+                          <p className="text-xs text-slate-400 truncate mt-0.5">
                             {cat?.name || 'Tanpa Kategori'}
+                            {t.walletId && walletMap.get(t.walletId)
+                              ? ` • ${walletMap.get(t.walletId)?.name}`
+                              : ''}{' '}
+                            • {formatDateIndo(t.date, { showDay: false })}
                           </p>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-3 shrink-0">
+                      <div className="flex items-center gap-2 shrink-0">
                         <span
-                          className={`text-xs sm:text-base font-extrabold ${
+                          className={`text-sm font-extrabold text-right ${
                             t.type === 'income'
                               ? 'text-emerald-600 dark:text-emerald-400'
                               : 'text-slate-900 dark:text-white'
@@ -441,21 +450,20 @@ export const Transaksi: React.FC<TransaksiProps> = ({ onOpenAddModal }) => {
                           {t.type === 'income' ? '+' : '-'} {formatRupiah(t.amount)}
                         </span>
 
-                        {/* Action buttons (Edit & Delete) */}
-                        <div className="flex items-center gap-1 opacity-90 sm:opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex items-center gap-0.5">
                           <button
                             onClick={() => onOpenAddModal(t)}
                             title="Edit Transaksi"
                             className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 dark:hover:bg-slate-800 transition-colors"
                           >
-                            <Edit2 className="w-4 h-4" />
+                            <Edit2 className="w-3.5 h-3.5" />
                           </button>
                           <button
                             onClick={() => t.id && setDeletingId(t.id)}
                             title="Hapus Transaksi"
                             className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-slate-800 transition-colors"
                           >
-                            <Trash2 className="w-4 h-4" />
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>

@@ -85,7 +85,7 @@ export function calculatePercentageChange(
 /**
  * Export transactions to standard CSV with UTF-8 BOM for Excel compatibility
  */
-export function exportToCsv(transactions: Transaction[], categories: Category[], filename = 'dompetku-transaksi.csv') {
+export function exportToCsv(transactions: Transaction[], categories: Category[], filename = 'uangku-transaksi.csv') {
   const catMap = new Map<number, string>();
   categories.forEach((c) => {
     if (c.id) catMap.set(c.id, c.name);
@@ -126,11 +126,11 @@ export function generateIcsFile(
   // Format date to YYYYMMDD
   const dateFormatted = targetDate.replace(/-/g, '');
   const now = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-  const uid = `dompetku-${Date.now()}@dompetku.app`;
+  const uid = `uangku-${Date.now()}@uangku.app`;
 
   const ics = `BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//DompetKu//Catatan Keuangan Pribadi//ID
+PRODID:-//Uangku//Catatan Keuangan Pribadi//ID
 CALSCALE:GREGORIAN
 BEGIN:VEVENT
 UID:${uid}

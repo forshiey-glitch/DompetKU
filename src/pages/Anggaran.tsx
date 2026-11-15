@@ -29,11 +29,11 @@ export const Anggaran: React.FC = () => {
   const allTransactions = useLiveQuery(() => db.transactions.toArray()) || [];
 
   const budgets = useMemo(() => {
-    return allBudgets.filter((b) => !b.userId || b.userId === userId || b.userId === 'default-user');
+    return allBudgets.filter((b) => b.userId === userId);
   }, [allBudgets, userId]);
 
   const transactions = useMemo(() => {
-    return allTransactions.filter((t) => !t.userId || t.userId === userId || t.userId === 'default-user');
+    return allTransactions.filter((t) => t.userId === userId);
   }, [allTransactions, userId]);
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -138,11 +138,11 @@ export const Anggaran: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6 sm:space-y-8 pb-28 max-w-4xl mx-auto animate-in fade-in duration-300">
+    <div className="space-y-6 pb-8 w-full animate-in fade-in duration-300">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+          <h1 className="text-xl sm:text-2xl font-extrabold text-slate-900 dark:text-white tracking-tight">
             Anggaran Bulanan
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -382,19 +382,19 @@ export const Anggaran: React.FC = () => {
                 />
               </div>
 
-              <div className="flex gap-2 justify-end pt-2">
+              <div className="flex flex-col gap-2 pt-2">
+                <button
+                  type="submit"
+                  className="w-full py-3 px-4 text-xs sm:text-sm font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm"
+                >
+                  Simpan Anggaran
+                </button>
                 <button
                   type="button"
                   onClick={() => setModalOpen(false)}
-                  className="px-4 py-2 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
+                  className="w-full py-2.5 px-4 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
                 >
                   Batal
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-xs font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white"
-                >
-                  Simpan Anggaran
                 </button>
               </div>
             </form>

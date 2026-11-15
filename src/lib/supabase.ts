@@ -18,7 +18,7 @@ export const supabase: SupabaseClient = createClient(
   {
     auth: {
       persistSession: true,
-      storageKey: 'dompetku-supabase-auth',
+      storageKey: 'uangku-supabase-auth',
       storage: window.localStorage,
       autoRefreshToken: true,
       detectSessionInUrl: true,

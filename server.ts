@@ -21,30 +21,51 @@ app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 // Helper to clean JSON string from LLM responses
 function cleanJsonOutput(text: string): any {
   let cleaned = text.trim();
-  // Remove markdown code fences if present
-  if (cleaned.startsWith('```json')) {
-    cleaned = cleaned.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-  } else if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```\s*/, '').replace(/\s*```$/, '');
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced && fenced[1]) {
+    cleaned = fenced[1].trim();
+  }
+  // Extract first JSON object if surrounding prose exists
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
   }
   return JSON.parse(cleaned);
 }
 
+// Ensure image input is ALWAYS a valid Data URL (data:image/...;base64,...)
+function ensureImageDataUrl(rawImage: string, mimeType = 'image/jpeg'): string {
+  const sanitized = rawImage.trim();
+  if (sanitized.startsWith('data:image/')) {
+    const commaIdx = sanitized.indexOf(',');
+    if (commaIdx !== -1) {
+      const prefix = sanitized.slice(0, commaIdx + 1);
+      const b64 = sanitized.slice(commaIdx + 1).replace(/\s+/g, '');
+      return `${prefix}${b64}`;
+    }
+    return sanitized;
+  }
+  const safeMime = mimeType.startsWith('image/') ? mimeType : 'image/jpeg';
+  const cleanB64 = sanitized.replace(/^data:[^;]+;base64,/, '').replace(/\s+/g, '');
+  return `data:${safeMime};base64,${cleanB64}`;
+}
+
 /**
  * Endpoint: POST /api/scan-receipt
- * Reads receipt image via z.ai GLM-4.6V-Flash (or fallback to Gemini if ZAI_API_KEY is not configured)
+ * Reads receipt image via z.ai GLM-4.6V-Flash (with Data URL format) or fallback to Gemini
  */
 app.post('/api/scan-receipt', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { imageBase64, mimeType = 'image/jpeg' } = req.body;
-    if (!imageBase64) {
+    const { imageBase64, mimeType = 'image/jpeg' } = req.body || {};
+    if (!imageBase64 || typeof imageBase64 !== 'string') {
+      console.log('[ScanStruk] Request rejected: imageBase64 missing');
       res.status(400).json({ success: false, error: 'Gambar struk tidak ditemukan.' });
       return;
     }
 
-    const formattedDataUrl = imageBase64.startsWith('data:')
-      ? imageBase64
-      : `data:${mimeType};base64,${imageBase64}`;
+    const formattedDataUrl = ensureImageDataUrl(imageBase64, mimeType);
+    console.log('[ScanStruk] Image Data URL prepared:', formattedDataUrl.slice(0, 45) + '...');
 
     const zaiApiKey = process.env.ZAI_API_KEY;
     const geminiApiKey = process.env.GEMINI_API_KEY;
@@ -52,6 +73,7 @@ app.post('/api/scan-receipt', async (req: Request, res: Response): Promise<void>
     // 1. Primary: z.ai GLM-4.6V-Flash
     if (zaiApiKey && zaiApiKey !== 'your_z_ai_api_key_here') {
       try {
+        console.log('[ZAI] Sending receipt scan request to glm-4.6v-flash...');
         const response = await fetch('https://api.z.ai/api/paas/v4/chat/completions', {
           method: 'POST',
           headers: {
@@ -63,7 +85,8 @@ app.post('/api/scan-receipt', async (req: Request, res: Response): Promise<void>
             messages: [
               {
                 role: 'system',
-                content: 'Anda adalah asisten OCR struk belanja. Analisis gambar struk dan kembalikan HANYA format JSON valid tanpa tanda kutip markdown backticks.',
+                content:
+                  'Anda adalah asisten OCR struk belanja. Analisis gambar struk dan kembalikan HANYA JSON valid tanpa teks tambahan atau markdown backticks.',
               },
               {
                 role: 'user',
@@ -85,32 +108,39 @@ app.post('/api/scan-receipt', async (req: Request, res: Response): Promise<void>
           }),
         });
 
+        const rawText = await response.text();
         if (!response.ok) {
-          const errText = await response.text();
-          console.error('z.ai API error:', errText);
-          throw new Error(`z.ai API error: ${response.status} - ${errText}`);
+          console.log(`[ZAI Error] Status ${response.status}:`, rawText);
+          throw new Error(`ZAI API error (${response.status}): ${rawText}`);
         }
 
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content || '{}';
+        const data = JSON.parse(rawText);
+        const content = data?.choices?.[0]?.message?.content;
+        if (!content || typeof content !== 'string') {
+          console.log('[ZAI Error] Empty or invalid choices payload:', rawText);
+          throw new Error('Respons ZAI tidak berisi hasil pembacaan struk.');
+        }
+
         const parsed = cleanJsonOutput(content);
-        res.json({ success: true, provider: 'z.ai GLM-4.6V-Flash', data: parsed });
+        console.log('[ZAI] Receipt parsed successfully for merchant:', parsed?.merchant);
+        res.json({ success: true, provider: 'AI OCR', data: parsed });
         return;
       } catch (err: any) {
-        console.warn('z.ai call failed, trying fallback if available:', err.message);
+        console.log('[ZAI Failed]', err?.message || err);
         if (!geminiApiKey) {
           res.status(502).json({
             success: false,
-            error: `Gagal memproses struk dengan z.ai: ${err.message}. Silakan periksa ZAI_API_KEY atau masukkan data secara manual.`,
+            error: `Gagal memproses struk: ${err?.message || 'Layanan OCR tidak merespons'}. Silakan coba lagi atau masukkan data secara manual.`,
           });
           return;
         }
       }
     }
 
-    // 2. Intelligent Fallback: Gemini API if available in environment
+    // 2. Fallback: Gemini API if available in environment
     if (geminiAi) {
       try {
+        console.log('[ScanStruk] Attempting Gemini fallback...');
         const base64Data = formattedDataUrl.replace(/^data:[^;]+;base64,/, '');
         const actualMime = formattedDataUrl.match(/^data:([^;]+);/)?.[1] || mimeType;
 
@@ -139,38 +169,43 @@ app.post('/api/scan-receipt', async (req: Request, res: Response): Promise<void>
 
         const text = response.text || '{}';
         const parsed = cleanJsonOutput(text);
-        res.json({ success: true, provider: 'AI Vision Fallback', data: parsed });
+        console.log('[ScanStruk] Fallback parsed successfully');
+        res.json({ success: true, provider: 'AI Vision', data: parsed });
         return;
       } catch (err: any) {
-        console.error('Gemini fallback error:', err);
+        console.log('[ScanStruk Fallback Error]', err?.message || err);
         res.status(500).json({
           success: false,
-          error: `Gagal memproses struk: ${err.message}. Silakan masukkan data secara manual.`,
+          error: `Gagal memproses struk: ${err?.message || 'Kesalahan server'}. Silakan masukkan data secara manual.`,
         });
         return;
       }
     }
 
-    // No API keys configured
+    console.log('[ScanStruk] No AI API key configured in environment');
     res.status(400).json({
       success: false,
-      error: 'ZAI_API_KEY belum dikonfigurasi di file .env. Silakan atur ZAI_API_KEY atau masukkan data transaksi secara manual.',
+      error: 'Kunci API OCR (ZAI_API_KEY) belum dikonfigurasi. Silakan masukkan transaksi secara manual.',
     });
   } catch (err: any) {
-    console.error('Unexpected scan error:', err);
-    res.status(500).json({ success: false, error: err.message || 'Terjadi kesalahan sistem saat memproses struk.' });
+    console.log('[ScanStruk Unexpected Error]', err?.message || err);
+    res.status(500).json({
+      success: false,
+      error: err?.message || 'Terjadi kesalahan sistem saat memproses struk.',
+    });
   }
 });
 
 /**
  * Endpoint: POST /api/consult
- * Financial consultation via OpenRouter free model (or fallback to Gemini)
+ * Financial consultation via OpenRouter (model: openrouter/free) or fallback to Gemini
  */
 app.post('/api/consult', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { message, history = [], financialSummary } = req.body;
+    const { message, history = [], financialSummary } = req.body || {};
 
-    if (!message || typeof message !== 'string') {
+    if (!message || typeof message !== 'string' || !message.trim()) {
+      console.log('[Consult] Request rejected: empty message');
       res.status(400).json({ success: false, error: 'Pesan pertanyaan tidak boleh kosong.' });
       return;
     }
@@ -180,6 +215,7 @@ app.post('/api/consult', async (req: Request, res: Response): Promise<void> => {
 
     const summaryText = financialSummary
       ? `\n\n--- RINGKASAN DATA KEUANGAN PENGGUNA SAAT INI ---
+- Total Saldo Semua Dompet: Rp ${Number(financialSummary.totalWalletBalance || 0).toLocaleString('id-ID')}
 - Total Pemasukan (3 Bulan Terakhir): Rp ${Number(financialSummary.totalIncome3Months || 0).toLocaleString('id-ID')}
 - Total Pengeluaran (3 Bulan Terakhir): Rp ${Number(financialSummary.totalExpense3Months || 0).toLocaleString('id-ID')}
 - Selisih/Net Simpanan: Rp ${Number(financialSummary.netSavings3Months || 0).toLocaleString('id-ID')}
@@ -191,34 +227,43 @@ app.post('/api/consult', async (req: Request, res: Response): Promise<void> => {
 ------------------------------------------------------`
       : '';
 
-    const systemPrompt = `Anda adalah "DompetKu AI", konsultan dan penasihat keuangan pribadi yang ramah, bijak, praktis, dan berorientasi solusi untuk pengguna di Indonesia.
+    const systemPrompt = `Anda adalah "Uangku AI", konsultan dan penasihat keuangan pribadi yang ramah, bijak, praktis, dan berorientasi solusi untuk pengguna di Indonesia.
 Pedoman Anda:
 1. Analisis kondisi keuangan pengguna berdasarkan ringkasan data keuangan yang dilampirkan.
 2. Berikan saran yang realistis dengan gaya bahasa Indonesia santun, menyemangati, dan to the point.
 3. Gunakan formatting bullet points atau nomor agar mudah dibaca.
 4. Gunakan mata uang Rupiah (Rp).
 5. Sertakan tips penghematan atau strategi alokasi (seperti 50/30/20 atau dana darurat) yang relevan.
-6. Selalu ingat bahwa di akhir tanggapan, tambahkan pengingat singkat: "Catatan: Ini adalah simulasi saran AI dan bukan nasihat keuangan profesional berlisensi."`;
+6. Di akhir tanggapan, tambahkan pengingat singkat: "Catatan: Ini adalah simulasi saran AI dan bukan nasihat keuangan profesional berlisensi."`;
 
-    // 1. Primary: OpenRouter
+    // Ensure valid OpenRouter messages structure (non-empty string content, valid roles)
+    const sanitizedHistory = Array.isArray(history)
+      ? history
+          .slice(-6)
+          .filter((h: any) => h && typeof h.content === 'string' && h.content.trim().length > 0)
+          .map((h: any) => ({
+            role: h.role === 'user' ? 'user' : 'assistant',
+            content: h.content.trim(),
+          }))
+      : [];
+
+    const messagesToSend = [
+      { role: 'system', content: systemPrompt + summaryText },
+      ...sanitizedHistory,
+      { role: 'user', content: message.trim() },
+    ];
+
+    // 1. Primary: OpenRouter (openrouter/free)
     if (openrouterApiKey && openrouterApiKey !== 'your_openrouter_api_key_here') {
       try {
-        const messagesToSend = [
-          { role: 'system', content: systemPrompt + summaryText },
-          ...history.slice(-6).map((h: any) => ({
-            role: h.role === 'user' ? 'user' : 'assistant',
-            content: h.content,
-          })),
-          { role: 'user', content: message },
-        ];
-
+        console.log(`[OpenRouter] Sending consult request (${messagesToSend.length} messages) to model openrouter/free...`);
         const openrouterRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${openrouterApiKey}`,
             'HTTP-Referer': process.env.APP_URL || 'http://localhost:3000',
-            'X-Title': 'DompetKu Personal Finance',
+            'X-Title': 'Uangku Personal Finance',
           },
           body: JSON.stringify({
             model: 'openrouter/free',
@@ -227,24 +272,28 @@ Pedoman Anda:
           }),
         });
 
+        const rawBody = await openrouterRes.text();
         if (!openrouterRes.ok) {
-          const errBody = await openrouterRes.text();
-          console.error('OpenRouter error:', errBody);
-          throw new Error(`OpenRouter returned status ${openrouterRes.status}: ${errBody}`);
+          console.log(`[OpenRouter Error] Status ${openrouterRes.status}:`, rawBody);
+          throw new Error(`OpenRouter status ${openrouterRes.status}: ${rawBody}`);
         }
 
-        const openrouterData = await openrouterRes.json();
-        const reply = openrouterData.choices?.[0]?.message?.content;
-        if (reply) {
-          res.json({ success: true, reply, provider: 'OpenRouter (Free)' });
-          return;
+        const openrouterData = JSON.parse(rawBody);
+        const reply = openrouterData?.choices?.[0]?.message?.content;
+        if (!reply || typeof reply !== 'string') {
+          console.log('[OpenRouter Error] Missing reply content in payload:', rawBody);
+          throw new Error('Model OpenRouter tidak mengembalikan jawaban teks.');
         }
+
+        console.log('[OpenRouter] Consult reply generated successfully');
+        res.json({ success: true, reply, provider: 'AI Advisor' });
+        return;
       } catch (err: any) {
-        console.warn('OpenRouter call failed, attempting fallback if available:', err.message);
+        console.log('[OpenRouter Failed]', err?.message || err);
         if (!geminiApiKey) {
           res.status(502).json({
             success: false,
-            error: `Gagal menghubungi OpenRouter: ${err.message}. Periksa OPENROUTER_API_KEY Anda.`,
+            error: `Gagal menghubungi layanan AI: ${err?.message || 'OpenRouter tidak merespons'}. Silakan coba beberapa saat lagi.`,
           });
           return;
         }
@@ -254,7 +303,8 @@ Pedoman Anda:
     // 2. Fallback: Gemini API if available
     if (geminiAi) {
       try {
-        const fullPrompt = `${systemPrompt}${summaryText}\n\nRiwayat Percakapan:\n${history.map((h: any) => `${h.role}: ${h.content}`).join('\n')}\n\nPertanyaan Pengguna: ${message}`;
+        console.log('[Consult] Attempting Gemini fallback...');
+        const fullPrompt = `${systemPrompt}${summaryText}\n\nRiwayat Percakapan:\n${sanitizedHistory.map((h) => `${h.role}: ${h.content}`).join('\n')}\n\nPertanyaan Pengguna: ${message.trim()}`;
 
         const response = await geminiAi.models.generateContent({
           model: 'gemini-3.8-flash',
@@ -262,26 +312,33 @@ Pedoman Anda:
         });
 
         const reply = response.text || '';
-        res.json({ success: true, reply, provider: 'AI Advisor Fallback' });
+        if (!reply.trim()) {
+          throw new Error('Respons AI kosong.');
+        }
+        console.log('[Consult] Fallback reply generated successfully');
+        res.json({ success: true, reply, provider: 'AI Advisor' });
         return;
       } catch (err: any) {
-        console.error('Gemini consult error:', err);
+        console.log('[Consult Fallback Error]', err?.message || err);
         res.status(500).json({
           success: false,
-          error: `Gagal memproses konsultasi AI: ${err.message}`,
+          error: `Gagal memproses konsultasi AI: ${err?.message || 'Kesalahan server'}`,
         });
         return;
       }
     }
 
-    // No API keys configured
+    console.log('[Consult] No AI API key configured in environment');
     res.status(400).json({
       success: false,
-      error: 'OPENROUTER_API_KEY belum dikonfigurasi di file .env. Silakan atur OPENROUTER_API_KEY untuk menggunakan fitur konsultasi AI.',
+      error: 'Kunci API konsultasi (OPENROUTER_API_KEY) belum dikonfigurasi.',
     });
   } catch (err: any) {
-    console.error('Consultation error:', err);
-    res.status(500).json({ success: false, error: err.message || 'Terjadi kesalahan sistem pada konsultasi AI.' });
+    console.log('[Consult Unexpected Error]', err?.message || err);
+    res.status(500).json({
+      success: false,
+      error: err?.message || 'Terjadi kesalahan sistem pada konsultasi AI.',
+    });
   }
 });
 
@@ -312,11 +369,11 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[DompetKu] Server running on http://0.0.0.0:${PORT}`);
+    console.log(`[Uangku] Server running on http://0.0.0.0:${PORT}`);
   });
 }
 
 startServer().catch((err) => {
-  console.error('[DompetKu] Server startup failed:', err);
+  console.error('[Uangku] Server startup failed:', err);
   process.exit(1);
 });
